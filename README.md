@@ -31,10 +31,13 @@ This custom node for ComfyUI is designed to optimize latent generation for use w
 
 ## Example Usage
 
-In the ComfyUI workflow, insert this node where you need to generate a latent with a specific resolution and aspect ratio. Pass the latent to an upscaling node (such as UltimateSDUpscale) for further processing.
+In the ComfyUI workflow, insert this node where you need to generate a latent with a specific resolution and aspect ratio. Pass the latent to an upscaling node (such as UltimateSDUpscale) for further processing. to use with UltimateSDUpscale you must first right-click the node and chage the following widgets to inputs tile_width, tile_height, upscale_by.
+
+![image](https://github.com/user-attachments/assets/f6b4cfec-c5f2-432c-9ab3-6e2ab0f11b79)
+
 
 ```plaintext
-[Latent] --> [Bobs FLUX/SDXL Latent Optimizer] --> [Upscaling Node]
+[Bobs FLUX/SDXL Latent Optimizer] --> [sampler node] ~~> [Upscaling Node]
 ```
 
 ## Contributions
