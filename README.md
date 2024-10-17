@@ -12,7 +12,7 @@ This custom node for ComfyUI is designed to optimize latent generation for use w
 
 ## Installation
 
-1. Download the `.py` file [Bobs_FLUX_SDXL_Latent_Optimizer.py](path-to-your-node-file).
+1. Download the `.py` file [Bobs_FLUX_SDXL_Latent_Optimizer.py](Bobs_FLUX_SDXL_Latent_Optimizer.py).
 2. Place the file in the `custom_nodes` folder of your ComfyUI installation.
 3. Restart ComfyUI to load the node.
 
@@ -44,7 +44,3 @@ Feel free to submit issues or pull requests to improve the node. Any feedback or
 ## License
 
 This project is licensed under the MIT License.
-
----
-
-Feel free to modify or expand on this draft to suit your preferences. Let me know if you need any changes!
