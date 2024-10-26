@@ -1,4 +1,4 @@
-MIT License
+MIT License with Commercial Revenue Clause
 
 Copyright (c) 2024 BobsBlazed
 
@@ -9,8 +9,13 @@ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
 copies of the Software, and to permit persons to whom the Software is
 furnished to do so, subject to the following conditions:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. The above copyright notice and this permission notice shall be included in all
+   copies or substantial portions of the Software.
+
+2. If the Software is used for commercial purposes and the total gross revenue
+   generated from the use of the Software exceeds $1,000,000 USD, the entity or
+   individual using the Software must obtain a commercial license from the
+   copyright holder (BobsBlazed) and pay any applicable fees.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
