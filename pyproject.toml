@@ -1,14 +1,14 @@
 [project]
-name = "bobs_flux_sdxl_latent_optimizer"
-description = "This custom node for ComfyUI is designed to optimize latent generation for use with both FLUX and SDXL modes. It provides flexible control over aspect ratios, megapixel sizes, and upscale factors, allowing users to dynamically create latents that fit specific tiling and resolution needs."
-version = "1.0.0"
+name = "bobs_latent_optimizer"
+description = "This custom node for ComfyUI is designed to optimize latent generation for use with both FLUX, SDXL and SD3 modes. It provides flexible control over aspect ratios, megapixel sizes, and upscale factors, allowing users to dynamically create latents that fit specific tiling and resolution needs."
+version = "1.0.1"
 license = {file = "LICENSE"}
 
 [project.urls]
-Repository = "https://github.com/BobsBlazed/Bobs_FLUX_SDXL_Latent_Optimizer"
+Repository = "https://github.com/BobsBlazed/Bobs_Latent_Optimizer"
 #  Used by Comfy Registry https://comfyregistry.org
 
 [tool.comfy]
 PublisherId = ""
-DisplayName = "Bobs_FLUX_SDXL_Latent_Optimizer"
+DisplayName = "Bobs_Latent_Optimizer"
 Icon = ""
