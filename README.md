@@ -1,6 +1,6 @@
 # Bobs FLUX/SDXL/SD3.5L Latent Optimizer Node
 
-This custom node for ComfyUI is designed to optimize latent generation for use with both FLUX and SDXL modes. It provides flexible control over aspect ratios, megapixel sizes, and upscale factors, allowing users to dynamically create latents that fit specific tiling and resolution needs.
+This custom node for ComfyUI is designed to optimize latent generation for use with both FLUX, SDXL and SD3 modes. It provides flexible control over aspect ratios, megapixel sizes, and upscale factors, allowing users to dynamically create latents that fit specific tiling and resolution needs.
 
 ## Features
 
@@ -12,7 +12,7 @@ This custom node for ComfyUI is designed to optimize latent generation for use w
 
 ## Installation
 
-1. Download the `.py` file [Bobs_FLUX_SDXL_Latent_Optimizer.py](Bobs_FLUX_SDXL_Latent_Optimizer.py).
+1. Download the `.py` file [Bobs_Latent_Optimizer.py](Bobs_Latent_Optimizer.py).
 2. Place the file in the `custom_nodes` folder of your ComfyUI installation.
 3. Restart ComfyUI to load the node.
 
