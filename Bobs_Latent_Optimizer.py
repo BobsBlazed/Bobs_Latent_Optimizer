@@ -18,7 +18,7 @@ class BobsFluxSDXLLatentNode:
                     "max": 10.0,
                     "step": .01
                 }),
-                "mode": (["FLUX", "SDXL"], {"default": "FLUX"})
+                "mode": (["FLUX", "SDXL", "SD3"], {"default": "FLUX"})
             }
         }
 
@@ -46,9 +46,15 @@ class BobsFluxSDXLLatentNode:
         target_width = int((target_area * aspect_ratio_multiplier) ** 0.5)
         target_height = int(target_width / aspect_ratio_multiplier)
 
-        if mode == "SDXL":
+        if mode == "SDXL" or mode == "SD3":
             target_width = (target_width // 64) * 64
             target_height = (target_height // 64) * 64
+
+            if mode == "SD3":
+                target_area_sd3 = 1024 * 1024
+                scaling_factor = (target_area_sd3 / (target_width * target_height)) ** 0.5
+                target_width = int(target_width * scaling_factor) // 64 * 64
+                target_height = int(target_height * scaling_factor) // 64 * 64
 
         latent = EmptyLatentImage().generate(target_width, target_height, 1)[0]
 
@@ -67,5 +73,5 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "BobsFluxSDXLLatentNode": "Bobs FLUX/SDXL Latent Optimizer"
+    "Bobs-Latent": "Bobs Latent Optimizer"
 }
