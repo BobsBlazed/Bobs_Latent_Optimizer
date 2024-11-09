@@ -1,4 +1,3 @@
-
 from nodes import EmptyLatentImage
 import torch
 
@@ -18,7 +17,8 @@ class BobsFluxSDXLLatentNode:
                     "max": 10.0,
                     "step": .01
                 }),
-                "mode": (["FLUX", "SDXL", "SD3"], {"default": "FLUX"})
+                "mode": (["FLUX", "SDXL", "SD3"], {"default": "FLUX"}),
+                "batch_size": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1})  # New batch size input
             }
         }
 
@@ -26,7 +26,7 @@ class BobsFluxSDXLLatentNode:
     RETURN_NAMES = ("latent", "tile_width", "tile_height", "upscale_by")
     FUNCTION = "generate"
 
-    def generate(self, aspect_ratio, mp_size, upscale_by, mode):
+    def generate(self, aspect_ratio, mp_size, upscale_by, mode, batch_size):  # Added batch_size parameter
         try:
             ratio_w, ratio_h = map(int, aspect_ratio.split(":"))
         except ValueError:
@@ -56,7 +56,7 @@ class BobsFluxSDXLLatentNode:
                 target_width = int(target_width * scaling_factor) // 64 * 64
                 target_height = int(target_height * scaling_factor) // 64 * 64
 
-        latent = EmptyLatentImage().generate(target_width, target_height, 1)[0]
+        latent = EmptyLatentImage().generate(target_width, target_height, batch_size)[0]  # Updated to use batch_size
 
         tile_width = int(target_width * upscale_by) // 2
         tile_height = int(target_height * upscale_by) // 2
