@@ -67,11 +67,3 @@ class BobsFluxSDXLLatentNode:
             tile_height,
             upscale_by
         )
-
-NODE_CLASS_MAPPINGS = {
-    "BobsFluxSDXLLatentNode": BobsFluxSDXLLatentNode
-}
-
-NODE_DISPLAY_NAME_MAPPINGS = {
-    "Bobs-Latent": "Bobs Latent Optimizer"
-}
