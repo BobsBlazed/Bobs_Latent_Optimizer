@@ -1,9 +1,13 @@
-from .Bobs_Latent_Optimizer import BobsFluxSDXLLatentNode
+from .Bobs_Latent_Optimizer import BobsLatentNode import BobsLatentNodeAdvanced
 
+# --- NODE MAPPINGS ---
 NODE_CLASS_MAPPINGS = {
-    "BobsFluxSDXLLatentNode": BobsFluxSDXLLatentNode
+    "BobsLatentNode": BobsLatentNode,
+    "BobsLatentNodeAdvanced": BobsLatentNodeAdvanced
 }
 
+# --- NODE DISPLAY NAMES ---
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "Bobs-Latent": "Bobs Latent Optimizer"
+    "Bobs-Latent-Optimizer": "Bobs Latent Optimizer",
+    "Bobs-Advanced-Latent-Optimizer": "Bobs Latent Optimizer (Advanced)"
 }
