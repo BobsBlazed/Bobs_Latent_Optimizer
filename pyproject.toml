@@ -1,7 +1,7 @@
 [project]
 name = "bobs_latent_optimizer"
 description = "This custom node for ComfyUI is designed to optimize latent generation for use with FLUX, SDXL and SD3. It provides flexible control over aspect ratios, megapixel sizes, and upscale factors, allowing users to dynamically create latents that fit specific tiling and resolution needs."
-version = "1.2.1"
+version = "1.2.2"
 license = {file = "LICENSE"}
 
 [project.urls]
