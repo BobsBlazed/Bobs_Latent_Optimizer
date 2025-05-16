@@ -43,7 +43,7 @@ This node provides a selection of commonly used Megapixel areas as discrete opti
 *   **Category:** `latent/generate`
 *   **Inputs:**
     *   `aspect_ratio` (`STRING`): Target image aspect ratio (e.g., '1:1', '16:9', '3:2'). Determines the shape of the BASE latent image. Default: '1:1'.
-    *   `mp_size` (`["0.25", "0.5", "1", "1.5", "2", "2.5", "3", "4"]`): Approximate target megapixel area for the BASE latent image. These options map to common standard resolution areas (e.g., 1 is 1024x1024 area, 4 is 2048x2048 area). Default: '1'.
+    *   `mp_size` (`["0.25", "0.5", "1", "1.25", "1.5", "1.75", "2", "2.5", "3", "4"]`): Approximate target megapixel area for the BASE latent image. These options map to common standard resolution areas (e.g., 1 is 1024x1024 area, 4 is 2048x2048 area). Default: '1'.
     *   `upscale_by` (`FLOAT`): Desired upscale factor for the FINAL output image. Used to calculate tiling dimensions for a 2x2 grid in pixel space. Does NOT upscale the generated latent. Default: 2.0.
     *   `model_type` (`["FLUX", "SDXL", "SD3"]`): Select the target model type to set base resolution rounding rules and latent channel count (FLUX=16, SDXL/SD3=4). Default: 'FLUX'.
     *   `batch_size` (`INT`): Number of latent images in the batch. Default: 1.
