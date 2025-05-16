@@ -67,7 +67,9 @@ class BobsLatentNode:
             "0.25": 512 * 512,   # Common ~0.25MP resolution area
             "0.5": 768 * 768,    # Common ~0.5MP resolution area
             "1": 1024 * 1024,    # Common 1MP resolution area
+            "1.25": 1280 * 1024, # Approx 1.25MP area (SXGA)
             "1.5": 1440 * 1080,  # Common resolution area (~1.5MP)
+            "1.75": 1664 * 1088, # Approx 1.75MP area
             "2": 1920 * 1080,    # Common ~2MP resolution area
             "2.5": 1536 * 1536,  # Common resolution area (~2.25MP)
             "3": 1792 * 1792,  # Common resolution area (~3MP)
