@@ -31,7 +31,7 @@ class BobsLatentNode:
             "required": {
                 "aspect_ratio": ("STRING", {"default": "1:1", "tooltip": "Target image aspect ratio (e.g., '1:1', '16:9', '3:2'). This determines the shape of the BASE latent image."}),
                 # Extended MP size options to include values mapping up to 2048x2048 area (~4MP base)
-                "mp_size": (["0.25", "0.5", "1", "1.5", "2", "2.5", "3", "4"], {"default": "1", "tooltip": "Approximate target megapixel area for the BASE latent image. These options map to common standard resolution areas (e.g., 1 is 1024x1024 area, 4 is 2048x2048 area)."}),
+                "mp_size": (["0.25", "0.5", "1", "1.25", "1.5", "1.75", "2", "2.5", "3", "4"], {"default": "1", "tooltip": "Approximate target megapixel area for the BASE latent image. These options map to common standard resolution areas (e.g., 1 is 1024x1024 area, 4 is 2048x2048 area)."}),
                 "upscale_by": ("FLOAT", {
                     "default": 2.0,
                     "min": 1.0,
