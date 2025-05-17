@@ -57,7 +57,7 @@ This node provides a selection of commonly used Megapixel areas as discrete opti
 
 This node allows for precise control over the Megapixel area using a continuous float input.
 
-*   **Display Name:** `Bobs Advanced Latent Optimizer (Float MP)`
+*   **Display Name:** `Bobs Advanced Latent Optimizer Advanced (Float MP)`
 *   **Category:** `latent/generate`
 *   **Inputs:**
     *   `aspect_ratio` (`STRING`): Target image aspect ratio (e.g., '1:1', '16:9', '3:2'). Determines the shape of the BASE latent image. Default: '1:1'.
