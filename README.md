@@ -1,85 +1,104 @@
 # Bobs Latent Optimizer for ComfyUI
 
-Custom nodes to generate empty latent images specifically optimized for FLUX, SDXL, and SD3 models within ComfyUI. These nodes ensure the correct latent channel count, handle base resolution rounding for model compatibility, and provide calculated tile dimensions to assist in optimizing tiled upscaling workflows.
+A set of custom nodes for ComfyUI designed to generate optimized empty latent images, ideal for models like FLUX, SDXL, and SD3. These nodes help you easily define your desired aspect ratio and approximate image resolution (in megapixels) and will automatically calculate dimensions that are compatible with the selected model.
+
+A key feature is the intelligent calculation of **tile dimensions for upscaling workflows**. The nodes aim to provide optimal tile sizes (width and height) for a subsequent tiled upscaler (like Ultimate SD Upscale, Tiled VAE Decode, etc.), helping to improve performance and manage VRAM usage during high-resolution upscales.
 
 ## Features
 
-*   **Model-Specific Latent Generation:** Automatically generates empty latent images with the correct channel count:
-    *   **FLUX:** 16 latent channels
-    *   **SDXL / SD3:** 4 latent channels
-*   **Flexible Base Resolution Control:** Define the base latent image dimensions using aspect ratio combined with an approximate Megapixel (MP) area.
-*   **Accurate Rounding:** Rounds the calculated base pixel dimensions to the **nearest** multiple of 64 (required for VAE compatibility) to best match the requested aspect ratio and area.
-*   **SD3 Compatibility:** Includes specific resolution scaling logic for SD3 models.
-*   **Tiled Upscale Optimization:** Calculates and outputs suggested `tile_width` and `tile_height` dimensions designed for a 2x2 tiling grid of your *final upscaled pixel output*. This helps minimize the number of tiles needed for efficiency.
-*   **Batching Support:** Generate multiple latents simultaneously using the `batch_size` input.
-*   **Two Node Variants:** Choose between a node with discrete, commonly used MP size options and an advanced node with a continuous float MP size input for finer control.
+*   **Aspect Ratio Control:** Easily define common aspect ratios like "1:1", "16:9", "3:2", etc.
+*   **Megapixel-Based Sizing:**
+    *   **Standard Node:** Choose from a predefined list of approximate megapixel areas (e.g., 0.5MP, 1MP, 4MP).
+    *   **Advanced Node:** Use a continuous float input for precise megapixel targets.
+*   **Model-Specific Optimizations:**
+    *   Automatically rounds base pixel dimensions to the nearest multiple of 64 for model compatibility.
+    *   Sets the correct number of latent channels (16 for FLUX, 4 for SDXL/SD3).
+    *   Applies SD3-specific target area scaling logic if "SD3" model type is selected.
+*   **Batch Size Support:** Generate batches of latent images.
+*   **Optimized Tiling Calculation for Upscalers:**
+    *   Calculates `tile_width` and `tile_height` for a *subsequent* upscaling step.
+    *   Aims for a **2x2 grid (4 tiles)** for the upscaled image by default.
+    *   If a 2x2 grid would result in individual tiles larger than **2048x2048 pixels**, the number of tiles is increased (e.g., to 3x2, 2x3, 3x3 etc.) to ensure no single tile dimension exceeds 2048.
+    *   This provides sensible tile sizes to feed into tiled upscaler nodes, potentially speeding up generation and reducing VRAM strain.
+*   **Outputs Ready for Workflow:** Provides the generated latent, calculated tile dimensions, and the upscale factor for easy integration.
+
+## Nodes
+
+### 1. Bobs Latent Optimizer (`BobsLatentNode`)
+
+The standard node for generating optimized latent images.
+
+*   **Key Difference:** Uses a dropdown menu (`mp_size`) with predefined approximate megapixel sizes (e.g., "1" for a 1024x1024 area, "4" for a 2048x2048 area).
+
+### 2. Bobs Latent Optimizer (Advanced) (`BobsLatentNodeAdvanced`)
+
+The advanced version offering finer control over the target resolution.
+
+*   **Key Difference:** Uses a float input (`mp_size_float`) for specifying the target megapixel area directly (e.g., 1.0 for 1MP, 0.75 for 0.75MP).
 
 ## Installation
 
-1.  Navigate to your ComfyUI installation's `custom_nodes` directory.
-    ```bash
-    cd ComfyUI/custom_nodes/
-    ```
-2.  Clone this repository into the `custom_nodes` directory.
-    ```bash
-    git clone https://github.com/BobsBlazed/Bobs_Latent_Optimizer.git
-    ```
-3.  Restart your ComfyUI server. The new nodes should appear under the `latent/generate` category.
+1.  Navigate to your ComfyUI `custom_nodes` directory:
+    *   `cd ComfyUI/custom_nodes/`
+2.  Clone this repository:
+    *   `git clone https://github.com/BobsBlazed/Bobs_Latent_Optimizer.git`
+3.  Restart ComfyUI.
+    The nodes "Bobs Latent Optimizer" and "Bobs Latent Optimizer (Advanced)" should now be available in the "latent/generate" category.
 
 ## Usage
 
-1.  Add the desired node (`Bobs Latent Optimizer (Discrete MP)` or `Bobs Advanced Latent Optimizer (Float MP)`) from the `latent/generate` category.
-2.  Connect the `latent` output to the `latent_image` input of your KSampler node.
-3.  Set the `aspect_ratio`, `mp_size` (or `mp_size_float`), `upscale_by`, and `model_type` inputs according to your desired base resolution and target model.
-4.  Use the `tile_width` and `tile_height` outputs to configure a downstream tiling or tiled upscaling node (e.g., nodes from WAS Node Suite, Ultimate SD Upscale, etc.). These dimensions represent the size of each tile if you were to divide the *final upscaled pixel image* into a 2x2 grid.
+Both nodes share a similar set of inputs and outputs, with the main difference being how the target megapixel size is specified.
 
-## Node Details
+### Inputs
 
-### Bobs Latent Optimizer (Discrete MP)
+*   **`aspect_ratio` (STRING):** The target aspect ratio for the base latent image (e.g., "1:1", "16:9", "4:3").
+*   **`mp_size` (STRING list - Standard Node only):** Approximate target megapixel area for the base latent image, chosen from a list.
+*   **`mp_size_float` (FLOAT - Advanced Node only):** Precise target megapixel area for the base latent image (e.g., 1.0 = 1024x1024 pixels).
+*   **`upscale_by` (FLOAT):** The desired upscale factor for the *final output image*. This value is **crucial** as it's used to calculate the `tile_width` and `tile_height` for a subsequent tiled upscaler. This node *does not* perform the upscale itself.
+*   **`model_type` (STRING list):** Select the target model (FLUX, SDXL, SD3) to apply appropriate rounding rules and latent channel counts.
+*   **`batch_size` (INT):** Number of latent images to generate in the batch.
 
-This node provides a selection of commonly used Megapixel areas as discrete options.
+### Outputs
 
-*   **Display Name:** `Bobs Latent Optimizer (Discrete MP)`
-*   **Category:** `latent/generate`
-*   **Inputs:**
-    *   `aspect_ratio` (`STRING`): Target image aspect ratio (e.g., '1:1', '16:9', '3:2'). Determines the shape of the BASE latent image. Default: '1:1'.
-    *   `mp_size` (`["0.25", "0.5", "1", "1.25", "1.5", "1.75", "2", "2.5", "3", "4"]`): Approximate target megapixel area for the BASE latent image. These options map to common standard resolution areas (e.g., 1 is 1024x1024 area, 4 is 2048x2048 area). Default: '1'.
-    *   `upscale_by` (`FLOAT`): Desired upscale factor for the FINAL output image. Used to calculate tiling dimensions for a 2x2 grid in pixel space. Does NOT upscale the generated latent. Default: 2.0.
-    *   `model_type` (`["FLUX", "SDXL", "SD3"]`): Select the target model type to set base resolution rounding rules and latent channel count (FLUX=16, SDXL/SD3=4). Default: 'FLUX'.
-    *   `batch_size` (`INT`): Number of latent images in the batch. Default: 1.
-*   **Outputs:**
-    *   `latent` (`LATENT`): The generated empty base latent image (with correct channels and dimensions).
-    *   `tile_width` (`INT`): Suggested tile width for a 2x2 grid of the final upscaled pixel image.
-    *   `tile_height` (`INT`): Suggested tile height for a 2x2 grid of the final upscaled pixel image.
-    *   `upscale_by` (`FLOAT`): The upscale factor used for calculation (passed through).
+*   **`latent` (LATENT):** The generated empty latent image(s) as a dictionary (`{"samples": tensor}`).
+*   **`tile_width` (INT):** The calculated suggested width for each tile of the *upscaled pixel output*.
+*   **`tile_height` (INT):** The calculated suggested height for each tile of the *upscaled pixel output*.
+*   **`upscale_by` (FLOAT):** The input upscale factor, passed through for convenience in your workflow.
 
-### Bobs Advanced Latent Optimizer (Float MP)
+### Example Workflow
 
-This node allows for precise control over the Megapixel area using a continuous float input.
+These nodes are typically used at the beginning of an image generation workflow, before the KSampler. The key is to connect the `tile_width` and `tile_height` outputs to a tiled upscaler node that you might use *after* your initial generation and VAE decode.
 
-*   **Display Name:** `Bobs Advanced Latent Optimizer Advanced (Float MP)`
-*   **Category:** `latent/generate`
-*   **Inputs:**
-    *   `aspect_ratio` (`STRING`): Target image aspect ratio (e.g., '1:1', '16:9', '3:2'). Determines the shape of the BASE latent image. Default: '1:1'.
-    *   `mp_size_float` (`FLOAT`): Target megapixel area (in millions of pixels, based on 1 MP = 1024\*1024 pixels) for the BASE latent image. Range 0.01 to 4.0 (4.0 is 2048x2048 area). Default: 1.0.
-    *   `upscale_by` (`FLOAT`): Desired upscale factor for the FINAL output image. Used to calculate tiling dimensions for a 2x2 grid in pixel space. Does NOT upscale the generated latent. Default: 2.0.
-    *   `model_type` (`["FLUX", "SDXL", "SD3"]`): Select the target model type to set base resolution rounding rules and latent channel count (FLUX=16, SDXL/SD3=4). Default: 'FLUX'.
-    *   `batch_size` (`INT`): Number of latent images in the batch. Default: 1.
-*   **Outputs:**
-    *   `latent` (`LATENT`): The generated empty base latent image (with correct channels and dimensions).
-    *   `tile_width` (`INT`): Suggested tile width for a 2x2 grid of the final upscaled pixel image.
-    *   `tile_height` (`INT`): Suggested tile height for a 2x2 grid of the final upscaled pixel image.
-    *   `upscale_by` (`FLOAT`): The upscale factor used for calculation (passed through).
+```
+[Bobs Latent Optimizer] ----> latent (to KSampler)
+                         |
+                         |---> tile_width  -----\
+                         |                     |
+                         |---> tile_height -----+--> [Your Tiled Upscaler Node] (e.g., Ultimate SD Upscale inputs: tile_width, tile_height)
+                         |                                   (or Tiled VAE Decode etc.)
+                         |
+                         ----> upscale_by ------> (Potentially to your Tiled Upscaler Node if it takes a scale factor directly)
 
-## Technical Details
+[KSampler] --------------> VAE --------------> [Tiled Upscaler Node]
+(using latent from above)  (decode)             (using tile_width, tile_height from above)
+```
 
-*   **Latent Channel Count:** FLUX models require a latent image with 16 channels, unlike SDXL/SD3 which use 4. This node bypasses the default 4-channel generation of `EmptyLatentImage` and manually creates a zero tensor with the correct number of channels based on the selected `model_type`.
-*   **Base Resolution Rounding:** Diffusion models trained on latent representations require the corresponding pixel dimensions to be divisible by a specific factor (typically 64, as the VAE downsamples by 8, and latent space is often processed in 8x8 patches). These nodes calculate initial dimensions based on area and aspect ratio and then round them to the **nearest** multiple of 64 to satisfy this requirement while staying as close as possible to the requested size.
-*   **Tiling Dimensions:** The `tile_width` and `tile_height` outputs are calculated to represent the dimensions needed for a 2x2 grid of the *final output image after upscaling*. The logic `(target_dimension * upscale_by) // 2` effectively gives you half of the total upscaled dimension, which is the size of each tile in a 2x2 arrangement. These values are designed to be fed into tiled upscaling nodes.
-*   **Megapixel (MP) Definition:** The MP size inputs in both nodes (discrete options and float value) are interpreted as target areas based on `1 MP = 1024 * 1024` pixels. The discrete options map to specific common resolution areas (e.g., 1920x1080 for "2 MP", 2048x2048 for "4 MP"), while the float input allows for a continuous range based on this 1024x1024 unit.
+**Why is this useful for tiling?**
 
-## Credits
+Instead of manually calculating or guessing tile sizes for your upscaler, this node provides sensible defaults based on your desired final resolution (`target_base_resolution * upscale_by`) and the 2048x2048 per-tile limit. This can prevent issues like:
+*   Tiles being too large, causing VRAM errors.
+*   Tiles being unnecessarily small, potentially leading to more processing overhead or seam issues if not handled well by the upscaler.
+*   Inconsistent tiling strategies.
 
-*   Developed by BobsBlazed.
-*   Inspired by the standard ComfyUI `EmptyLatentImage` node and the requirements of FLUX models.
-*   Improvements guided by collaborative analysis and testing.
+By aiming for a 2x2 grid (4 tiles total) unless the image is very large, it strikes a balance for common upscaling scenarios.
+
+## Benefits
+
+*   **Simplified Resolution Setup:** No need to manually calculate pixel dimensions that are multiples of 64.
+*   **Model Compatibility:** Ensures your latent images are correctly sized and have the right channel count for FLUX, SDXL, or SD3.
+*   **Optimized Upscaling:** Provides intelligent tile dimensions for downstream tiled upscalers, potentially improving performance and VRAM management.
+*   **Consistent Workflows:** Standardizes how you define resolutions and prepare for tiled upscaling.
+
+## Contributing
+
+Contributions, issues, and feature requests are welcome! Please feel free to open an issue or submit a pull request.
