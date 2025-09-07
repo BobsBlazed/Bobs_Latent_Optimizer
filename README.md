@@ -6,7 +6,7 @@ A key feature is the intelligent calculation of **tile dimensions for upscaling 
 
 ## Features
 
-*   **Aspect Ratio Control:** Easily define common aspect ratios like "1:1", "16:9", "3:2", etc.
+*   **Aspect Ratio Control:** Easily define custom and common aspect ratios like "1:1", "16:9", "3:2", "13:19", "85:110", etc.
 *   **Megapixel-Based Sizing:**
     *   **Standard Node:** Choose from a predefined list of approximate megapixel areas (e.g., 0.5MP, 1MP, 4MP).
     *   **Advanced Node:** Use a continuous float input for precise megapixel targets.
