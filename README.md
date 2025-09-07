@@ -1,6 +1,6 @@
 # Bobs Latent Optimizer for ComfyUI
 
-A set of custom nodes for ComfyUI designed to generate optimized empty latent images, ideal for models like FLUX, SDXL, and SD3. These nodes help you easily define your desired aspect ratio and approximate image resolution (in megapixels) and will automatically calculate dimensions that are compatible with the selected model.
+A set of custom nodes for ComfyUI designed to generate optimized empty latent images, ideal for models like FLUX, Qwen, SDXL, SD3 and WAN. These nodes help you easily define your desired aspect ratio and approximate image resolution (in megapixels) and will automatically calculate dimensions that are compatible with the selected model.
 
 A key feature is the intelligent calculation of **tile dimensions for upscaling workflows**. The nodes aim to provide optimal tile sizes (width and height) for a subsequent tiled upscaler (like Ultimate SD Upscale, Tiled VAE Decode, etc.), helping to improve performance and manage VRAM usage during high-resolution upscales.
 
@@ -12,7 +12,7 @@ A key feature is the intelligent calculation of **tile dimensions for upscaling 
     *   **Advanced Node:** Use a continuous float input for precise megapixel targets.
 *   **Model-Specific Optimizations:**
     *   Automatically rounds base pixel dimensions to the nearest multiple of 64 for model compatibility.
-    *   Sets the correct number of latent channels (16 for FLUX, 4 for SDXL/SD3).
+    *   Sets the correct number of latent channels (16 for FLUX, 4 for SDXL/SD3/Qwen/WAN).
     *   Applies SD3-specific target area scaling logic if "SD3" model type is selected.
 *   **Batch Size Support:** Generate batches of latent images.
 *   **Optimized Tiling Calculation for Upscalers:**
