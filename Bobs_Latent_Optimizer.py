@@ -14,10 +14,10 @@ MP_BASE_AREA = 1024 * 1024
 # --- BobsLatentNode ---
 class BobsLatentNode:
     """
-    Generates an empty latent image optimized for FLUX, SDXL, or SD3 models
+    Generates an empty latent image optimized for various models (FLUX, SDXL, SD3, QWEN, WAN)
     based on aspect ratio, approximate discrete megapixel size options, and batch size.
-    Calculates dimensions by rounding to the NEAREST multiple of 64 for model compatibility.
-    Handles the correct number of latent channels (4 for SDXL/SD3, 16 for FLUX).
+    Calculates dimensions by rounding to the NEAREST multiple appropriate for the selected model.
+    Handles the correct number of latent channels (4 for most, 16 for FLUX).
     Calculates tile dimensions for tiling of the *upscaled pixel output*
     to help optimize tiled upscale times. Aims for a 2x2 grid (4 tiles) unless
     individual tiles would exceed 2048x2048, in which case more tiles are used.
@@ -38,7 +38,7 @@ class BobsLatentNode:
                     "step": .01,
                     "tooltip": "Desired upscale factor for the FINAL output image. Used to calculate tiling dimensions in pixel space. Does NOT upscale the generated latent."
                 }),
-                "model_type": (["FLUX", "SDXL", "SD3"], {"default": "FLUX", "tooltip": "Select the target model type to set base resolution rounding rules and latent channel count (FLUX=16, SDXL/SD3=4)."}),
+                "model_type": (["FLUX", "SDXL", "SD3", "QWEN", "WAN"], {"default": "FLUX", "tooltip": "Select model to set resolution rounding rules and latent channels (FLUX=16, QWEN=round to 28, others=4 channels & round to 64)."}),
                 "batch_size": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1, "tooltip": "Number of latent images in the batch."})
             }
         }
@@ -80,27 +80,43 @@ class BobsLatentNode:
 
         # --- 2. Apply Model-Specific BASE Sizing and Get Latent Channels ---
         vae_scale_factor = 8
-        latent_channels = 4
-
-        target_width = round_to_nearest_multiple(initial_target_width_float, 64)
-        target_height = round_to_nearest_multiple(initial_target_height_float, 64)
-
-
-        if model_type == "SDXL" or model_type == "SD3":
-            if model_type == "SD3":
-                target_area_sd3_ref = 1024 * 1024
-                current_area = target_width * target_height
-                if current_area > 0:
-                     scaling_factor = (target_area_sd3_ref / current_area) ** 0.5
-                     target_width = int(target_width * scaling_factor)
-                     target_height = int(target_height * scaling_factor)
-                     target_width = round_to_nearest_multiple(target_width, 64)
-                     target_height = round_to_nearest_multiple(target_height, 64)
-                else:
-                     print(f"Warning: Calculated base dimensions were zero after initial rounding, skipping SD3 scaling.")
-        elif model_type == "FLUX":
+        
+        if model_type == "FLUX":
             latent_channels = 16
-
+            target_width = round_to_nearest_multiple(initial_target_width_float, 64)
+            target_height = round_to_nearest_multiple(initial_target_height_float, 64)
+        
+        elif model_type == "QWEN":
+            latent_channels = 4
+            target_width = round_to_nearest_multiple(initial_target_width_float, 28)
+            target_height = round_to_nearest_multiple(initial_target_height_float, 28)
+            
+        elif model_type == "SDXL" or model_type == "WAN":
+            latent_channels = 4
+            target_width = round_to_nearest_multiple(initial_target_width_float, 64)
+            target_height = round_to_nearest_multiple(initial_target_height_float, 64)
+        
+        elif model_type == "SD3":
+            latent_channels = 4
+            # First, round to 64 as a base
+            temp_width = round_to_nearest_multiple(initial_target_width_float, 64)
+            temp_height = round_to_nearest_multiple(initial_target_height_float, 64)
+            
+            # Then apply SD3 specific scaling logic
+            target_area_sd3_ref = 1024 * 1024
+            current_area = temp_width * temp_height
+            if current_area > 0:
+                 scaling_factor = (target_area_sd3_ref / current_area) ** 0.5
+                 target_width = int(temp_width * scaling_factor)
+                 target_height = int(temp_height * scaling_factor)
+                 # And re-round to 64
+                 target_width = round_to_nearest_multiple(target_width, 64)
+                 target_height = round_to_nearest_multiple(target_height, 64)
+            else:
+                 print(f"Warning: Calculated base dimensions were zero after initial rounding, skipping SD3 scaling.")
+                 target_width = temp_width
+                 target_height = temp_height
+        
         min_dim = 64
         if target_width < min_dim:
              print(f"Warning: Calculated base width was {target_width}. Clamping to minimum {min_dim}.")
@@ -169,10 +185,10 @@ class BobsLatentNode:
 # --- Advanced Node: BobsLatentNodeAdvanced ---
 class BobsLatentNodeAdvanced:
     """
-    Generates an empty latent image optimized for FLUX, SDXL, or SD3 models
+    Generates an empty latent image optimized for various models (FLUX, SDXL, SD3, QWEN, WAN)
     based on aspect ratio, a continuous float megapixel size, and batch size.
-    Calculates dimensions by rounding to the NEAREST multiple of 64 for model compatibility.
-    Handles the correct number of latent channels (4 for SDXL/SD3, 16 for FLUX).
+    Calculates dimensions by rounding to the NEAREST multiple appropriate for the selected model.
+    Handles the correct number of latent channels (4 for most, 16 for FLUX).
     Calculates tile dimensions for tiling of the *upscaled pixel output*
     to help optimize tiled upscale times. Aims for a 2x2 grid (4 tiles) unless
     individual tiles would exceed 2048x2048, in which case more tiles are used.
@@ -193,7 +209,7 @@ class BobsLatentNodeAdvanced:
                     "step": .01,
                     "tooltip": "Desired upscale factor for the FINAL output image. Used to calculate tiling dimensions in pixel space. Does NOT upscale the generated latent."
                 }),
-                "model_type": (["FLUX", "SDXL", "SD3"], {"default": "FLUX", "tooltip": "Select the target model type to set base resolution rounding rules and latent channel count (FLUX=16, SDXL/SD3=4)."}),
+                "model_type": (["FLUX", "SDXL", "SD3", "QWEN", "WAN"], {"default": "FLUX", "tooltip": "Select model to set resolution rounding rules and latent channels (FLUX=16, QWEN=round to 28, others=4 channels & round to 64)."}),
                 "batch_size": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1, "tooltip": "Number of latent images in the batch."})
             }
         }
@@ -221,26 +237,42 @@ class BobsLatentNodeAdvanced:
 
         # --- 2. Apply Model-Specific BASE Sizing and Get Latent Channels ---
         vae_scale_factor = 8
-        latent_channels = 4
-
-        target_width = round_to_nearest_multiple(initial_target_width_float, 64)
-        target_height = round_to_nearest_multiple(initial_target_height_float, 64)
-
-
-        if model_type == "SDXL" or model_type == "SD3":
-            if model_type == "SD3":
-                target_area_sd3_ref = 1024 * 1024
-                current_area = target_width * target_height
-                if current_area > 0:
-                     scaling_factor = (target_area_sd3_ref / current_area) ** 0.5
-                     target_width = int(target_width * scaling_factor)
-                     target_height = int(target_height * scaling_factor)
-                     target_width = round_to_nearest_multiple(target_width, 64)
-                     target_height = round_to_nearest_multiple(target_height, 64)
-                else:
-                     print(f"Warning: Calculated base dimensions were zero after initial rounding, skipping SD3 scaling.")
-        elif model_type == "FLUX":
+        
+        if model_type == "FLUX":
             latent_channels = 16
+            target_width = round_to_nearest_multiple(initial_target_width_float, 64)
+            target_height = round_to_nearest_multiple(initial_target_height_float, 64)
+        
+        elif model_type == "QWEN":
+            latent_channels = 4
+            target_width = round_to_nearest_multiple(initial_target_width_float, 28)
+            target_height = round_to_nearest_multiple(initial_target_height_float, 28)
+            
+        elif model_type == "SDXL" or model_type == "WAN":
+            latent_channels = 4
+            target_width = round_to_nearest_multiple(initial_target_width_float, 64)
+            target_height = round_to_nearest_multiple(initial_target_height_float, 64)
+        
+        elif model_type == "SD3":
+            latent_channels = 4
+            # First, round to 64 as a base
+            temp_width = round_to_nearest_multiple(initial_target_width_float, 64)
+            temp_height = round_to_nearest_multiple(initial_target_height_float, 64)
+            
+            # Then apply SD3 specific scaling logic
+            target_area_sd3_ref = 1024 * 1024
+            current_area = temp_width * temp_height
+            if current_area > 0:
+                 scaling_factor = (target_area_sd3_ref / current_area) ** 0.5
+                 target_width = int(temp_width * scaling_factor)
+                 target_height = int(temp_height * scaling_factor)
+                 # And re-round to 64
+                 target_width = round_to_nearest_multiple(target_width, 64)
+                 target_height = round_to_nearest_multiple(target_height, 64)
+            else:
+                 print(f"Warning: Calculated base dimensions were zero after initial rounding, skipping SD3 scaling.")
+                 target_width = temp_width
+                 target_height = temp_height
 
         min_dim = 64
         if target_width < min_dim:
@@ -261,7 +293,6 @@ class BobsLatentNodeAdvanced:
              raise RuntimeError(f"Error creating empty latent tensor with shape [{batch_size}, {latent_channels}, {latent_height}, {latent_width}] for {model_type}: {e}")
 
         print(f"Generated {model_type} base latent: Batch={batch_size}, Channels={latent_channels}, Latent Size=({latent_width}x{latent_height}), Base Pixel Size=({target_width}x{target_height})")
-
 
         # --- 4. Calculate Tile Dimensions for Tiling of the FINAL Upscaled Pixel Output ---
         upscaled_total_width = int(target_width * upscale_by)
@@ -314,8 +345,8 @@ NODE_CLASS_MAPPINGS = {
 
 # --- NODE DISPLAY NAMES ---
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "Bobs-Latent-Optimizer": "Bobs Latent Optimizer",
-    "Bobs-Advanced-Latent-Optimizer": "Bobs Latent Optimizer (Advanced)"
+    "BobsLatentNode": "Bobs Latent Optimizer",
+    "BobsLatentNodeAdvanced": "Bobs Latent Optimizer (Advanced)"
 }
 
 # --- END OF FILE Bobs_Latent_Optimizer.py ---
