@@ -1,7 +1,13 @@
 """Bobs Latent Optimizer - empty latent generation with model-aware sizing.
 
-Generates empty latents whose pixel dimensions are legal for the selected model
-family, and derives sensible tile dimensions for a downstream tiled upscaler.
+Generates empty latents whose pixel dimensions, channel count and rank are legal
+for the selected model family, and derives sensible tile dimensions for a
+downstream tiled upscaler.
+
+Every entry in MODEL_SPECS is taken from ComfyUI's own `comfy/latent_formats.py`
+(`latent_channels`, `latent_dimensions`, `spacial_downscale_ratio`,
+`temporal_downscale_ratio`) and cross-checked against the matching
+`Empty*Latent*` node in `nodes.py` / `comfy_extras/`.
 """
 
 import logging
@@ -22,27 +28,53 @@ except ImportError:
 
 MP_BASE_AREA = 1024 * 1024
 
-VAE_SCALE_FACTOR = 8
-
 MAX_TILE_DIM = 2048
 
-# Per-model latent channel count and pixel alignment.
+# Model table.
 #
-# `channels` is the channel count of the model's VAE: SDXL is the only 4-channel
-# family here. FLUX, SD3/3.5, Qwen-Image and Wan all use 16-channel VAEs.
+#   channels  - latent channel count (latent_formats.latent_channels)
+#   vae_scale - spatial downscale from pixels to latent (spacial_downscale_ratio)
+#   align     - pixel alignment; MUST be a multiple of vae_scale so that
+#               pixel_size // vae_scale is exact and the reported pixel
+#               dimensions actually describe the tensor we return
+#   temporal  - temporal downscale (temporal_downscale_ratio); video models only
+#   dims      - 2 for image models ([B,C,H,W]), 3 for video ([B,C,T,H,W])
 #
-# `align` must stay a multiple of VAE_SCALE_FACTOR so that
-# pixel_size // VAE_SCALE_FACTOR is exact and the reported pixel dimensions
-# actually describe the tensor we return.
+# Video latents use ComfyUI's frame formula: ((length - 1) // temporal) + 1.
 MODEL_SPECS = {
-    "FLUX": {"channels": 16, "align": 64},
-    "SDXL": {"channels": 4, "align": 64},
-    "SD3": {"channels": 16, "align": 64},
-    "QWEN": {"channels": 16, "align": 16},
-    "WAN": {"channels": 16, "align": 16},
+    # --- 4-channel SD-family VAE ---
+    "SD15": {"channels": 4, "vae_scale": 8, "align": 64, "temporal": 1, "dims": 2},
+    "SD21": {"channels": 4, "vae_scale": 8, "align": 64, "temporal": 1, "dims": 2},
+    "SDXL": {"channels": 4, "vae_scale": 8, "align": 64, "temporal": 1, "dims": 2},
+    "PIXART": {"channels": 4, "vae_scale": 8, "align": 64, "temporal": 1, "dims": 2},
+    "AURAFLOW": {"channels": 4, "vae_scale": 8, "align": 64, "temporal": 1, "dims": 2},
+    "HUNYUAN_DIT": {"channels": 4, "vae_scale": 8, "align": 64, "temporal": 1, "dims": 2},
+    # --- 16-channel image models ---
+    "SD3": {"channels": 16, "vae_scale": 8, "align": 64, "temporal": 1, "dims": 2},
+    "FLUX": {"channels": 16, "vae_scale": 8, "align": 64, "temporal": 1, "dims": 2},
+    "CHROMA": {"channels": 16, "vae_scale": 8, "align": 64, "temporal": 1, "dims": 2},
+    "HIDREAM": {"channels": 16, "vae_scale": 8, "align": 64, "temporal": 1, "dims": 2},
+    "LUMINA2": {"channels": 16, "vae_scale": 8, "align": 64, "temporal": 1, "dims": 2},
+    "OMNIGEN2": {"channels": 16, "vae_scale": 8, "align": 64, "temporal": 1, "dims": 2},
+    "QWEN": {"channels": 16, "vae_scale": 8, "align": 16, "temporal": 1, "dims": 2},
+    "COSMOS_PREDICT2": {"channels": 16, "vae_scale": 8, "align": 16, "temporal": 1, "dims": 2},
+    # --- high-channel / high-compression image models ---
+    "FLUX2": {"channels": 128, "vae_scale": 16, "align": 64, "temporal": 1, "dims": 2},
+    "HUNYUAN_IMAGE": {"channels": 64, "vae_scale": 32, "align": 64, "temporal": 1, "dims": 2},
+    # Chroma Radiance works directly in pixel space - no VAE downscale at all.
+    "CHROMA_RADIANCE": {"channels": 3, "vae_scale": 1, "align": 16, "temporal": 1, "dims": 2},
+    # --- video models (5-D latents; use the `length` input) ---
+    "WAN": {"channels": 16, "vae_scale": 8, "align": 16, "temporal": 4, "dims": 3},
+    "WAN22": {"channels": 48, "vae_scale": 16, "align": 32, "temporal": 4, "dims": 3},
+    "HUNYUAN_VIDEO": {"channels": 16, "vae_scale": 8, "align": 16, "temporal": 4, "dims": 3},
+    "COSMOS": {"channels": 16, "vae_scale": 8, "align": 16, "temporal": 8, "dims": 3},
+    "MOCHI": {"channels": 12, "vae_scale": 8, "align": 16, "temporal": 6, "dims": 3},
+    "LTXV": {"channels": 128, "vae_scale": 32, "align": 32, "temporal": 8, "dims": 3},
 }
 
 MODEL_TYPES = list(MODEL_SPECS.keys())
+
+VIDEO_MODEL_TYPES = [name for name, spec in MODEL_SPECS.items() if spec["dims"] == 3]
 
 # Discrete area presets. These are approximate megapixel labels mapped to common
 # standard resolution areas rather than exact multiples of 1MP.
@@ -60,6 +92,8 @@ MP_SIZE_TO_AREA = {
 }
 
 MP_SIZES = list(MP_SIZE_TO_AREA.keys())
+
+TILE_ALIGN = 8
 
 _ASPECT_SEPARATORS = (":", "/", "x", "X", ",")
 
@@ -126,14 +160,26 @@ def compute_base_dimensions(target_area, aspect_ratio_multiplier, align):
     """
     if target_area <= 0:
         raise ValueError(f"Target area must be positive, got {target_area}.")
+    if align <= 0:
+        raise ValueError(f"Alignment must be positive, got {align}.")
 
     width = math.sqrt(target_area * aspect_ratio_multiplier)
     height = width / aspect_ratio_multiplier
 
-    minimum = max(align, VAE_SCALE_FACTOR)
-    width = max(minimum, round_to_nearest_multiple(width, align))
-    height = max(minimum, round_to_nearest_multiple(height, align))
+    width = max(align, round_to_nearest_multiple(width, align))
+    height = max(align, round_to_nearest_multiple(height, align))
     return width, height
+
+
+def compute_latent_frames(length, temporal):
+    """Latent temporal size for `length` pixel-space frames.
+
+    Matches ComfyUI's video latent nodes: ((length - 1) // temporal) + 1.
+    """
+    length = max(1, int(length))
+    if temporal <= 1:
+        return length
+    return ((length - 1) // temporal) + 1
 
 
 def compute_tile_dimensions(width, height, upscale_by, max_tile_dim=MAX_TILE_DIM):
@@ -141,13 +187,13 @@ def compute_tile_dimensions(width, height, upscale_by, max_tile_dim=MAX_TILE_DIM
 
     Aims for a 2x2 grid, adding tiles along an axis only when a 2x2 tile would
     exceed `max_tile_dim`. Tile dimensions are aligned up to a multiple of
-    VAE_SCALE_FACTOR because tiled VAE/upscaler nodes expect that.
+    TILE_ALIGN because tiled VAE/upscaler nodes expect that.
 
     Returns (tile_width, tile_height, tiles_x, tiles_y).
     """
     upscaled_width = max(1, int(width * upscale_by))
     upscaled_height = max(1, int(height * upscale_by))
-    max_tile_dim = max(VAE_SCALE_FACTOR, int(max_tile_dim))
+    max_tile_dim = max(TILE_ALIGN, int(max_tile_dim))
 
     def axis_tiles(total):
         tiles = 2
@@ -160,9 +206,9 @@ def compute_tile_dimensions(width, height, upscale_by, max_tile_dim=MAX_TILE_DIM
 
     def tile_size(total, tiles):
         size = -(-total // tiles)
-        # Round the tile up to the VAE stride, but never past the whole image.
-        size = -(-size // VAE_SCALE_FACTOR) * VAE_SCALE_FACTOR
-        return max(VAE_SCALE_FACTOR, min(size, total))
+        # Round the tile up to the upscaler stride, but never past the whole image.
+        size = -(-size // TILE_ALIGN) * TILE_ALIGN
+        return max(TILE_ALIGN, min(size, total))
 
     return (
         tile_size(upscaled_width, tiles_x),
@@ -215,8 +261,9 @@ class _BobsLatentBase:
                 {
                     "default": "FLUX",
                     "tooltip": (
-                        "Model family. Sets latent channels (SDXL=4, FLUX/SD3/QWEN/WAN=16) and "
-                        "pixel alignment (64 for FLUX/SDXL/SD3, 16 for QWEN/WAN)."
+                        "Model family. Sets latent channels, VAE downscale and pixel alignment. "
+                        "Video families (" + ", ".join(VIDEO_MODEL_TYPES) + ") produce a 5-D "
+                        "latent and use the `length` input. See the README for the full table."
                     ),
                 },
             ),
@@ -242,9 +289,31 @@ class _BobsLatentBase:
                     ),
                 },
             ),
+            "length": (
+                "INT",
+                {
+                    "default": 1,
+                    "min": 1,
+                    "max": 4096,
+                    "step": 1,
+                    "tooltip": (
+                        "Number of video frames. Only used by video model families; ignored "
+                        "(with a warning) for image models."
+                    ),
+                },
+            ),
         }
 
-    def _build(self, aspect_ratio, target_area, upscale_by, model_type, batch_size, max_tile_size):
+    def _build(
+        self,
+        aspect_ratio,
+        target_area,
+        upscale_by,
+        model_type,
+        batch_size,
+        max_tile_size,
+        length,
+    ):
         spec = MODEL_SPECS.get(model_type)
         if spec is None:
             raise ValueError(
@@ -254,19 +323,31 @@ class _BobsLatentBase:
         aspect_ratio_multiplier = parse_aspect_ratio(aspect_ratio)
         width, height = compute_base_dimensions(target_area, aspect_ratio_multiplier, spec["align"])
 
-        latent_width = width // VAE_SCALE_FACTOR
-        latent_height = height // VAE_SCALE_FACTOR
+        vae_scale = spec["vae_scale"]
+        latent_width = width // vae_scale
+        latent_height = height // vae_scale
         channels = spec["channels"]
 
+        if spec["dims"] == 3:
+            frames = compute_latent_frames(length, spec["temporal"])
+            shape = [batch_size, channels, frames, latent_height, latent_width]
+        else:
+            frames = None
+            if length > 1:
+                logger.warning(
+                    "Bobs Latent Optimizer: length=%d ignored - %s is an image model and "
+                    "produces a 4-D latent. Pick a video model (%s) to use length.",
+                    length,
+                    model_type,
+                    ", ".join(VIDEO_MODEL_TYPES),
+                )
+            shape = [batch_size, channels, latent_height, latent_width]
+
         try:
-            samples = torch.zeros(
-                [batch_size, channels, latent_height, latent_width],
-                device=_latent_device(),
-            )
+            samples = torch.zeros(shape, device=_latent_device())
         except Exception as error:
             raise RuntimeError(
-                f"Could not allocate latent of shape "
-                f"[{batch_size}, {channels}, {latent_height}, {latent_width}] for {model_type}: {error}"
+                f"Could not allocate latent of shape {shape} for {model_type}: {error}"
             )
 
         tile_width, tile_height, tiles_x, tiles_y = compute_tile_dimensions(
@@ -274,15 +355,15 @@ class _BobsLatentBase:
         )
 
         logger.info(
-            "Bobs Latent Optimizer: %s %dx%d px (latent %dx%d, %d channels, batch %d) -> "
+            "Bobs Latent Optimizer: %s %dx%d px%s -> latent %s (/%d, %d channels) | "
             "upscaled %dx%d px in a %dx%d grid of %dx%d tiles",
             model_type,
             width,
             height,
-            latent_width,
-            latent_height,
+            "" if frames is None else f" x {int(length)} frames",
+            tuple(shape),
+            vae_scale,
             channels,
-            batch_size,
             int(width * upscale_by),
             int(height * upscale_by),
             tiles_x,
@@ -298,14 +379,16 @@ class BobsLatentNode(_BobsLatentBase):
     """Generate an empty latent from an aspect ratio and a preset megapixel area.
 
     Pixel dimensions are rounded to the nearest alignment step for the selected
-    model family, and the latent is allocated with that family's channel count.
-    Also returns tile dimensions for a downstream tiled upscaler, targeting a
-    2x2 grid unless that would push a tile past `max_tile_size`.
+    model family, and the latent is allocated with that family's channel count,
+    VAE downscale and rank. Also returns tile dimensions for a downstream tiled
+    upscaler, targeting a 2x2 grid unless that would push a tile past
+    `max_tile_size`.
     """
 
     DESCRIPTION = (
-        "Empty latent sized for FLUX / SDXL / SD3 / Qwen / Wan from an aspect ratio and a "
-        "preset megapixel area, plus suggested tile dimensions for tiled upscaling."
+        "Empty latent sized for a wide range of image and video model families from an "
+        "aspect ratio and a preset megapixel area, plus suggested tile dimensions for "
+        "tiled upscaling."
     )
 
     @classmethod
@@ -332,13 +415,24 @@ class BobsLatentNode(_BobsLatentBase):
         required.update(cls._shared_inputs())
         return {"required": required, "optional": cls._optional_inputs()}
 
-    def generate(self, aspect_ratio, mp_size, upscale_by, model_type, batch_size, max_tile_size=MAX_TILE_DIM):
+    def generate(
+        self,
+        aspect_ratio,
+        mp_size,
+        upscale_by,
+        model_type,
+        batch_size,
+        max_tile_size=MAX_TILE_DIM,
+        length=1,
+    ):
         target_area = MP_SIZE_TO_AREA.get(mp_size)
         if target_area is None:
             raise ValueError(
                 f"Unknown mp_size {mp_size!r}. Expected one of {', '.join(MP_SIZES)}."
             )
-        return self._build(aspect_ratio, target_area, upscale_by, model_type, batch_size, max_tile_size)
+        return self._build(
+            aspect_ratio, target_area, upscale_by, model_type, batch_size, max_tile_size, length
+        )
 
 
 class BobsLatentNodeAdvanced(_BobsLatentBase):
@@ -348,8 +442,9 @@ class BobsLatentNodeAdvanced(_BobsLatentBase):
     """
 
     DESCRIPTION = (
-        "Empty latent sized for FLUX / SDXL / SD3 / Qwen / Wan from an aspect ratio and a "
-        "continuous megapixel target, plus suggested tile dimensions for tiled upscaling."
+        "Empty latent sized for a wide range of image and video model families from an "
+        "aspect ratio and a continuous megapixel target, plus suggested tile dimensions "
+        "for tiled upscaling."
     )
 
     @classmethod
@@ -380,11 +475,26 @@ class BobsLatentNodeAdvanced(_BobsLatentBase):
         required.update(cls._shared_inputs())
         return {"required": required, "optional": cls._optional_inputs()}
 
-    def generate(self, aspect_ratio, mp_size_float, upscale_by, model_type, batch_size, max_tile_size=MAX_TILE_DIM):
+    def generate(
+        self,
+        aspect_ratio,
+        mp_size_float,
+        upscale_by,
+        model_type,
+        batch_size,
+        max_tile_size=MAX_TILE_DIM,
+        length=1,
+    ):
         if mp_size_float <= 0:
             raise ValueError(f"mp_size_float must be greater than zero, got {mp_size_float}.")
         return self._build(
-            aspect_ratio, mp_size_float * MP_BASE_AREA, upscale_by, model_type, batch_size, max_tile_size
+            aspect_ratio,
+            mp_size_float * MP_BASE_AREA,
+            upscale_by,
+            model_type,
+            batch_size,
+            max_tile_size,
+            length,
         )
 
 

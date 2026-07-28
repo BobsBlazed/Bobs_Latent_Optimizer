@@ -1,6 +1,6 @@
 # Bobs Latent Optimizer for ComfyUI
 
-A pair of custom nodes for ComfyUI that generate empty latents sized correctly for FLUX, SDXL, SD3, Qwen-Image and Wan. You give them an aspect ratio and a target megapixel area; they work out pixel dimensions that are legal for the selected model family and allocate the latent with that family's channel count.
+A pair of custom nodes for ComfyUI that generate empty latents sized correctly for **23 model families** — SD1.5 through Flux2, Qwen-Image, HiDream, HunyuanImage, and video models like Wan, LTXV and Mochi. You give them an aspect ratio and a target megapixel area; they work out pixel dimensions that are legal for the selected model family and allocate the latent with that family's channel count, VAE downscale and rank.
 
 They also calculate **tile dimensions for upscaling workflows**, so you can feed sensible `tile_width` / `tile_height` values straight into a tiled upscaler (Ultimate SD Upscale, Tiled VAE Decode, etc.) instead of guessing.
 
@@ -11,9 +11,11 @@ They also calculate **tile dimensions for upscaling workflows**, so you can feed
     *   **Standard Node:** pick from a list of approximate megapixel areas (0.25MP … 4MP).
     *   **Advanced Node:** a continuous float for an exact target area.
 *   **Model-Specific Optimizations:**
-    *   Rounds base pixel dimensions to the nearest alignment step for the chosen model (64 for FLUX/SDXL/SD3, 16 for Qwen/Wan).
-    *   Allocates the correct latent channel count — 4 for SDXL, 16 for FLUX, SD3, Qwen-Image and Wan.
-    *   Guarantees pixel dimensions stay divisible by the VAE stride, so the reported size always matches the tensor.
+    *   Rounds base pixel dimensions to the nearest alignment step for the chosen model.
+    *   Allocates the correct latent channel count — anywhere from 3 (Chroma Radiance, pixel space) to 128 (Flux2, LTXV).
+    *   Applies the correct VAE downscale — 1x, 8x, 16x or 32x depending on the family.
+    *   Guarantees pixel dimensions stay divisible by that downscale, so the reported size always matches the tensor.
+*   **Video Model Support:** video families emit a proper 5-D latent (`[B, C, T, H, W]`) using ComfyUI's frame formula `((length - 1) // temporal_downscale) + 1`.
 *   **Batch Size Support:** generate batches of latents.
 *   **Optimized Tiling Calculation for Upscalers:**
     *   Targets a **2x2 grid (4 tiles)** for the upscaled image.
@@ -49,9 +51,10 @@ The nodes appear under the **latent/generate** category.
 *   **`mp_size` (list — Standard node):** approximate target megapixel area.
 *   **`mp_size_float` (FLOAT — Advanced node):** exact target megapixel area (`1.0` = 1024x1024 pixels).
 *   **`upscale_by` (FLOAT):** the upscale factor for your *final* image. Used to compute `tile_width` / `tile_height`. **This node does not perform the upscale.**
-*   **`model_type` (list):** `FLUX`, `SDXL`, `SD3`, `QWEN` or `WAN` — selects alignment and latent channels.
+*   **`model_type` (list):** the model family — selects latent channels, VAE downscale, alignment and rank. See the table below.
 *   **`batch_size` (INT):** number of latents in the batch.
 *   **`max_tile_size` (INT, optional):** largest tile edge before the grid subdivides further. Default 2048; lower it if your upscaler runs out of VRAM.
+*   **`length` (INT, optional):** number of video frames. Only used by video families; image families ignore it and log a warning.
 
 ### Outputs
 
@@ -64,15 +67,44 @@ The nodes appear under the **latent/generate** category.
 
 ### Model reference
 
-| `model_type` | Latent channels | Pixel alignment |
-| ------------ | --------------- | --------------- |
-| FLUX         | 16              | 64              |
-| SDXL         | 4               | 64              |
-| SD3 / SD3.5  | 16              | 64              |
-| QWEN         | 16              | 16              |
-| WAN          | 16              | 16              |
+Every row is taken from ComfyUI's own `comfy/latent_formats.py` (`latent_channels`, `latent_dimensions`, `spacial_downscale_ratio`, `temporal_downscale_ratio`) and cross-checked against the matching `Empty*Latent*` node, so the shapes match what the samplers actually expect.
 
-> **Note on WAN:** Wan is a video model and its samplers expect a 5-D latent with a temporal axis. These nodes emit a 4-D image latent, so the `WAN` option is useful for Wan-compatible *image-space* sizing and channel count, not as a drop-in replacement for a Wan video latent node.
+#### Image families — latent is `[B, C, H/s, W/s]`
+
+| `model_type`      | Channels | VAE downscale | Alignment | Covers |
+| ----------------- | -------- | ------------- | --------- | ------ |
+| `SD15`            | 4        | 8             | 64        | SD 1.5, SVD, Stable Zero123 |
+| `SD21`            | 4        | 8             | 64        | SD 2.0 / 2.1 |
+| `SDXL`            | 4        | 8             | 64        | SDXL, Playground v2.5, SSD-1B, Segmind Vega, KOALA |
+| `PIXART`          | 4        | 8             | 64        | PixArt-α, PixArt-Σ |
+| `AURAFLOW`        | 4        | 8             | 64        | AuraFlow |
+| `HUNYUAN_DIT`     | 4        | 8             | 64        | HunyuanDiT |
+| `SD3`             | 16       | 8             | 64        | SD3, SD3.5 |
+| `FLUX`            | 16       | 8             | 64        | FLUX.1 dev/schnell, Kontext, Inpaint |
+| `CHROMA`          | 16       | 8             | 64        | Chroma |
+| `HIDREAM`         | 16       | 8             | 64        | HiDream-I1 |
+| `LUMINA2`         | 16       | 8             | 64        | Lumina Image 2.0, Z-Image |
+| `OMNIGEN2`        | 16       | 8             | 64        | OmniGen2 |
+| `QWEN`            | 16       | 8             | 16        | Qwen-Image |
+| `COSMOS_PREDICT2` | 16       | 8             | 16        | Cosmos Predict2 (text-to-image) |
+| `FLUX2`           | 128      | 16            | 64        | FLUX.2 |
+| `HUNYUAN_IMAGE`   | 64       | 32            | 64        | HunyuanImage 2.1 |
+| `CHROMA_RADIANCE` | 3        | 1             | 16        | Chroma Radiance (pixel space — no VAE) |
+
+#### Video families — latent is `[B, C, T, H/s, W/s]`
+
+`T` is derived from the `length` input as `((length - 1) // temporal) + 1`.
+
+| `model_type`     | Channels | VAE downscale | Temporal | Alignment | Covers |
+| ---------------- | -------- | ------------- | -------- | --------- | ------ |
+| `WAN`            | 16       | 8             | 4        | 16        | Wan 2.1 (T2V, I2V, VACE, Camera, …) |
+| `WAN22`          | 48       | 16            | 4        | 32        | Wan 2.2 T2V |
+| `HUNYUAN_VIDEO`  | 16       | 8             | 4        | 16        | HunyuanVideo, I2V, Skyreels |
+| `COSMOS`         | 16       | 8             | 8        | 16        | Cosmos 1.0 T2V / I2V |
+| `MOCHI`          | 12       | 8             | 6        | 16        | Genmo Mochi |
+| `LTXV`           | 128      | 32            | 8        | 32        | LTX-Video |
+
+**Not included:** Stable Cascade needs *two* latents (stage C and stage B) from one node, which doesn't fit this node's single-`LATENT` output. Audio and 3D formats (StableAudio, Hunyuan3D, ACEStep) aren't image/video latents at all.
 
 ### Example Workflow
 
@@ -102,13 +134,21 @@ Rather than guessing tile sizes, the node derives them from your desired final r
 
 ## Development
 
-The sizing and tiling math is exposed as plain functions (`parse_aspect_ratio`, `compute_base_dimensions`, `compute_tile_dimensions`), and the test suite stubs `torch`, so it runs without a ComfyUI or PyTorch install:
+The sizing and tiling math is exposed as plain functions (`parse_aspect_ratio`, `compute_base_dimensions`, `compute_tile_dimensions`, `compute_latent_frames`), and the test suite stubs `torch`, so it runs without a ComfyUI or PyTorch install:
 
 ```
 python -m unittest discover -s tests -v
 ```
 
 ## Changelog
+
+### 1.4.0
+
+*   **Added 18 model families**, taking the total from 5 to 23. New image families: `SD15`, `SD21`, `PIXART`, `AURAFLOW`, `HUNYUAN_DIT`, `CHROMA`, `HIDREAM`, `LUMINA2`, `OMNIGEN2`, `COSMOS_PREDICT2`, `FLUX2`, `HUNYUAN_IMAGE`, `CHROMA_RADIANCE`. New video families: `WAN22`, `HUNYUAN_VIDEO`, `COSMOS`, `MOCHI`, `LTXV`.
+*   **Added proper video latent support.** Video families now emit a 5-D latent `[B, C, T, H, W]` using ComfyUI's frame formula, driven by a new optional `length` input. Previously there was no way to produce a usable video latent.
+*   **Added per-model VAE downscale.** The downscale factor was hardcoded to 8, which cannot express Flux2 (16x), HunyuanImage 2.1 (32x), LTXV (32x), Wan 2.2 (16x) or Chroma Radiance (pixel space, 1x).
+*   **Changed:** `WAN` now produces a 5-D latent instead of a 4-D one. The 4-D latent was the documented limitation in 1.3.0 and was not usable with Wan samplers — this is the fix, but it is a visible change if you were relying on the old shape.
+*   Every channel count, downscale and temporal ratio is now verified against ComfyUI's `latent_formats.py` by a test.
 
 ### 1.3.0
 
