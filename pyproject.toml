@@ -1,8 +1,12 @@
 [project]
 name = "bobs_latent_optimizer"
 description = "This custom node for ComfyUI is designed to optimize latent generation for use with FLUX, Qwen, SDXL, SD3 and WAN. It provides flexible control over aspect ratios, megapixel sizes, and upscale factors, allowing users to dynamically create latents that fit specific tiling and resolution needs."
-version = "1.2.5"
+version = "1.3.0"
 license = {file = "LICENSE"}
+requires-python = ">=3.9"
+# torch is intentionally not declared: it is provided by the ComfyUI runtime and
+# pinning it here would fight with the user's existing install.
+dependencies = []
 
 [project.urls]
 Repository = "https://github.com/BobsBlazed/Bobs_Latent_Optimizer"

@@ -1,352 +1,399 @@
-# --- START OF FILE Bobs_Latent_Optimizer.py ---
+"""Bobs Latent Optimizer - empty latent generation with model-aware sizing.
 
-import torch
+Generates empty latents whose pixel dimensions are legal for the selected model
+family, and derives sensible tile dimensions for a downstream tiled upscaler.
+"""
+
+import logging
 import math
 
-def round_to_nearest_multiple(value, multiple):
-    """Rounds a value to the nearest multiple of 'multiple'."""
-    if multiple <= 0:
-        return value
-    return int(round(value / multiple) * multiple)
+import torch
+
+logger = logging.getLogger(__name__)
+
+# ComfyUI keeps freshly allocated latents on an "intermediate" device so they do
+# not pin VRAM before the sampler needs them. Fall back to CPU when the node is
+# imported outside of ComfyUI (tests, tooling).
+try:
+    import comfy.model_management as model_management
+except ImportError:
+    model_management = None
+
 
 MP_BASE_AREA = 1024 * 1024
 
-# --- BobsLatentNode ---
-class BobsLatentNode:
-    """
-    Generates an empty latent image optimized for various models (FLUX, SDXL, SD3, QWEN, WAN)
-    based on aspect ratio, approximate discrete megapixel size options, and batch size.
-    Calculates dimensions by rounding to the NEAREST multiple appropriate for the selected model.
-    Handles the correct number of latent channels (4 for most, 16 for FLUX).
-    Calculates tile dimensions for tiling of the *upscaled pixel output*
-    to help optimize tiled upscale times. Aims for a 2x2 grid (4 tiles) unless
-    individual tiles would exceed 2048x2048, in which case more tiles are used.
-    """
-    def __init__(self):
-        pass
+VAE_SCALE_FACTOR = 8
 
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "aspect_ratio": ("STRING", {"default": "1:1", "tooltip": "Target image aspect ratio (e.g., '1:1', '16:9', '3:2'). This determines the shape of the BASE latent image."}),
-                "mp_size": (["0.25", "0.5", "1", "1.25", "1.5", "1.75", "2", "2.5", "3", "4"], {"default": "1", "tooltip": "Approximate target megapixel area for the BASE latent image. These options map to common standard resolution areas (e.g., 1 is 1024x1024 area, 4 is 2048x2048 area)."}),
-                "upscale_by": ("FLOAT", {
-                    "default": 2.0,
-                    "min": 1.0,
-                    "max": 10.0,
-                    "step": .01,
-                    "tooltip": "Desired upscale factor for the FINAL output image. Used to calculate tiling dimensions in pixel space. Does NOT upscale the generated latent."
-                }),
-                "model_type": (["FLUX", "SDXL", "SD3", "QWEN", "WAN"], {"default": "FLUX", "tooltip": "Select model to set resolution rounding rules and latent channels (FLUX=16, QWEN=round to 28, others=4 channels & round to 64)."}),
-                "batch_size": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1, "tooltip": "Number of latent images in the batch."})
-            }
-        }
+MAX_TILE_DIM = 2048
 
-    RETURN_TYPES = ("LATENT", "INT", "INT", "FLOAT")
-    RETURN_NAMES = ("latent", "tile_width", "tile_height", "upscale_by")
+# Per-model latent channel count and pixel alignment.
+#
+# `channels` is the channel count of the model's VAE: SDXL is the only 4-channel
+# family here. FLUX, SD3/3.5, Qwen-Image and Wan all use 16-channel VAEs.
+#
+# `align` must stay a multiple of VAE_SCALE_FACTOR so that
+# pixel_size // VAE_SCALE_FACTOR is exact and the reported pixel dimensions
+# actually describe the tensor we return.
+MODEL_SPECS = {
+    "FLUX": {"channels": 16, "align": 64},
+    "SDXL": {"channels": 4, "align": 64},
+    "SD3": {"channels": 16, "align": 64},
+    "QWEN": {"channels": 16, "align": 16},
+    "WAN": {"channels": 16, "align": 16},
+}
+
+MODEL_TYPES = list(MODEL_SPECS.keys())
+
+# Discrete area presets. These are approximate megapixel labels mapped to common
+# standard resolution areas rather than exact multiples of 1MP.
+MP_SIZE_TO_AREA = {
+    "0.25": 512 * 512,
+    "0.5": 768 * 768,
+    "1": 1024 * 1024,
+    "1.25": 1280 * 1024,
+    "1.5": 1440 * 1080,
+    "1.75": 1664 * 1088,
+    "2": 1920 * 1080,
+    "2.5": 1536 * 1536,
+    "3": 1792 * 1792,
+    "4": 2048 * 2048,
+}
+
+MP_SIZES = list(MP_SIZE_TO_AREA.keys())
+
+_ASPECT_SEPARATORS = (":", "/", "x", "X", ",")
+
+
+def round_to_nearest_multiple(value, multiple):
+    """Round `value` to the nearest positive multiple of `multiple`."""
+    if multiple <= 0:
+        return int(round(value))
+    return int(round(value / multiple)) * multiple
+
+
+def parse_aspect_ratio(aspect_ratio):
+    """Parse an aspect ratio string into a width/height multiplier.
+
+    Accepts "16:9", "16/9", "16x9", "16,9" and decimal components such as
+    "1.5:1". A bare number ("1.777") is treated as the ratio itself.
+    """
+    if isinstance(aspect_ratio, (int, float)):
+        parts = [str(aspect_ratio)]
+    else:
+        text = str(aspect_ratio).strip()
+        if not text:
+            raise ValueError("Aspect ratio is empty. Use a format like '1:1' or '16:9'.")
+        parts = [text]
+        for separator in _ASPECT_SEPARATORS:
+            if separator in text:
+                parts = text.split(separator)
+                break
+
+    try:
+        numbers = [float(part.strip()) for part in parts]
+    except ValueError:
+        raise ValueError(
+            f"Invalid aspect ratio: {aspect_ratio!r}. Use 'width:height' with numeric "
+            "components, for example '1:1', '16:9' or '3:2'."
+        )
+
+    if len(numbers) == 1:
+        ratio = numbers[0]
+    elif len(numbers) == 2:
+        width, height = numbers
+        if height == 0:
+            raise ValueError(
+                f"Invalid aspect ratio: {aspect_ratio!r}. The height component cannot be zero."
+            )
+        ratio = width / height
+    else:
+        raise ValueError(
+            f"Invalid aspect ratio: {aspect_ratio!r}. Expected two components, got {len(numbers)}."
+        )
+
+    if not math.isfinite(ratio) or ratio <= 0:
+        raise ValueError(
+            f"Invalid aspect ratio: {aspect_ratio!r}. The ratio must be a positive number."
+        )
+    return ratio
+
+
+def compute_base_dimensions(target_area, aspect_ratio_multiplier, align):
+    """Return (width, height) in pixels covering ~`target_area`, aligned to `align`.
+
+    Both dimensions are clamped to at least one full alignment step so tiny
+    megapixel targets cannot produce a zero-sized latent.
+    """
+    if target_area <= 0:
+        raise ValueError(f"Target area must be positive, got {target_area}.")
+
+    width = math.sqrt(target_area * aspect_ratio_multiplier)
+    height = width / aspect_ratio_multiplier
+
+    minimum = max(align, VAE_SCALE_FACTOR)
+    width = max(minimum, round_to_nearest_multiple(width, align))
+    height = max(minimum, round_to_nearest_multiple(height, align))
+    return width, height
+
+
+def compute_tile_dimensions(width, height, upscale_by, max_tile_dim=MAX_TILE_DIM):
+    """Suggest tile dimensions for the upscaled pixel output.
+
+    Aims for a 2x2 grid, adding tiles along an axis only when a 2x2 tile would
+    exceed `max_tile_dim`. Tile dimensions are aligned up to a multiple of
+    VAE_SCALE_FACTOR because tiled VAE/upscaler nodes expect that.
+
+    Returns (tile_width, tile_height, tiles_x, tiles_y).
+    """
+    upscaled_width = max(1, int(width * upscale_by))
+    upscaled_height = max(1, int(height * upscale_by))
+    max_tile_dim = max(VAE_SCALE_FACTOR, int(max_tile_dim))
+
+    def axis_tiles(total):
+        tiles = 2
+        if -(-total // tiles) > max_tile_dim:
+            tiles = -(-total // max_tile_dim)
+        return max(1, tiles)
+
+    tiles_x = axis_tiles(upscaled_width)
+    tiles_y = axis_tiles(upscaled_height)
+
+    def tile_size(total, tiles):
+        size = -(-total // tiles)
+        # Round the tile up to the VAE stride, but never past the whole image.
+        size = -(-size // VAE_SCALE_FACTOR) * VAE_SCALE_FACTOR
+        return max(VAE_SCALE_FACTOR, min(size, total))
+
+    return (
+        tile_size(upscaled_width, tiles_x),
+        tile_size(upscaled_height, tiles_y),
+        tiles_x,
+        tiles_y,
+    )
+
+
+def _latent_device():
+    if model_management is not None:
+        return model_management.intermediate_device()
+    return torch.device("cpu")
+
+
+class _BobsLatentBase:
+    """Shared sizing, tiling and tensor allocation for both node variants."""
+
+    RETURN_TYPES = ("LATENT", "INT", "INT", "FLOAT", "INT", "INT")
+    RETURN_NAMES = ("latent", "tile_width", "tile_height", "upscale_by", "width", "height")
+    OUTPUT_TOOLTIPS = (
+        "Empty latent batch sized for the selected model.",
+        "Suggested tile width for a tiled upscaler operating on the upscaled pixel output.",
+        "Suggested tile height for a tiled upscaler operating on the upscaled pixel output.",
+        "The upscale factor, passed through unchanged for convenience.",
+        "Base image width in pixels.",
+        "Base image height in pixels.",
+    )
     FUNCTION = "generate"
     CATEGORY = "latent/generate"
 
-    def generate(self, aspect_ratio, mp_size, upscale_by, model_type, batch_size):
-
-        # --- 1. Calculate Target BASE Pixel Dimensions ---
-        try:
-            ratio_w, ratio_h = map(int, aspect_ratio.split(":"))
-            if ratio_h == 0: # Prevent division by zero
-                 raise ValueError("Height ratio cannot be zero.")
-            aspect_ratio_multiplier = (ratio_w / ratio_h)
-        except ValueError as e:
-            raise ValueError(f"Invalid aspect ratio format: {aspect_ratio}. Please use the format 'x:y' where x and y are integers (e.g., '1:1', '16:9'). Detail: {e}")
-
-
-        mp_to_area = {
-            "0.25": 512 * 512,
-            "0.5": 768 * 768,
-            "1": 1024 * 1024,
-            "1.25": 1280 * 1024,
-            "1.5": 1440 * 1080,
-            "1.75": 1664 * 1088,
-            "2": 1920 * 1080,
-            "2.5": 1536 * 1536,
-            "3": 1792 * 1792,
-            "4": 2048 * 2048,
-        }
-
-        target_area = mp_to_area.get(mp_size, 1024 * 1024)
-
-        initial_target_width_float = math.sqrt(target_area * aspect_ratio_multiplier)
-        initial_target_height_float = initial_target_width_float / aspect_ratio_multiplier
-
-        # --- 2. Apply Model-Specific BASE Sizing and Get Latent Channels ---
-        vae_scale_factor = 8
-        
-        if model_type == "FLUX":
-            latent_channels = 16
-            target_width = round_to_nearest_multiple(initial_target_width_float, 64)
-            target_height = round_to_nearest_multiple(initial_target_height_float, 64)
-        
-        elif model_type == "QWEN":
-            latent_channels = 4
-            target_width = round_to_nearest_multiple(initial_target_width_float, 28)
-            target_height = round_to_nearest_multiple(initial_target_height_float, 28)
-            
-        elif model_type == "SDXL" or model_type == "WAN":
-            latent_channels = 4
-            target_width = round_to_nearest_multiple(initial_target_width_float, 64)
-            target_height = round_to_nearest_multiple(initial_target_height_float, 64)
-        
-        elif model_type == "SD3":
-            latent_channels = 4
-            # First, round to 64 as a base
-            temp_width = round_to_nearest_multiple(initial_target_width_float, 64)
-            temp_height = round_to_nearest_multiple(initial_target_height_float, 64)
-            
-            # Then apply SD3 specific scaling logic
-            target_area_sd3_ref = 1024 * 1024
-            current_area = temp_width * temp_height
-            if current_area > 0:
-                 scaling_factor = (target_area_sd3_ref / current_area) ** 0.5
-                 target_width = int(temp_width * scaling_factor)
-                 target_height = int(temp_height * scaling_factor)
-                 # And re-round to 64
-                 target_width = round_to_nearest_multiple(target_width, 64)
-                 target_height = round_to_nearest_multiple(target_height, 64)
-            else:
-                 print(f"Warning: Calculated base dimensions were zero after initial rounding, skipping SD3 scaling.")
-                 target_width = temp_width
-                 target_height = temp_height
-        
-        min_dim = 64
-        if target_width < min_dim:
-             print(f"Warning: Calculated base width was {target_width}. Clamping to minimum {min_dim}.")
-             target_width = min_dim
-        if target_height < min_dim:
-             print(f"Warning: Calculated base height was {target_height}. Clamping to minimum {min_dim}.")
-             target_height = min_dim
-
-        # --- 3. Generate Empty Latent Image at BASE Resolution with Correct Channels ---
-        latent_width = target_width // vae_scale_factor
-        latent_height = target_height // vae_scale_factor
-
-        try:
-            latent_tensor = torch.zeros([batch_size, latent_channels, latent_height, latent_width])
-            latent = {"samples": latent_tensor}
-        except Exception as e:
-             raise RuntimeError(f"Error creating empty latent tensor with shape [{batch_size}, {latent_channels}, {latent_height}, {latent_width}] for {model_type}: {e}")
-
-        print(f"Generated {model_type} base latent: Batch={batch_size}, Channels={latent_channels}, Latent Size=({latent_width}x{latent_height}), Base Pixel Size=({target_width}x{target_height})")
-
-        # --- 4. Calculate Tile Dimensions for Tiling of the FINAL Upscaled Pixel Output ---
-        upscaled_total_width = int(target_width * upscale_by)
-        upscaled_total_height = int(target_height * upscale_by)
-
-        MAX_TILE_DIM = 2048
-
-        num_tiles_w = 2
-        num_tiles_h = 2
-
-        hypothetical_tile_w_for_2x2 = (upscaled_total_width + num_tiles_w - 1) // num_tiles_w
-        hypothetical_tile_h_for_2x2 = (upscaled_total_height + num_tiles_h - 1) // num_tiles_h
-        
-        if hypothetical_tile_w_for_2x2 > MAX_TILE_DIM:
-            num_tiles_w = int(math.ceil(upscaled_total_width / MAX_TILE_DIM))
-        
-        if hypothetical_tile_h_for_2x2 > MAX_TILE_DIM:
-            num_tiles_h = int(math.ceil(upscaled_total_height / MAX_TILE_DIM))
-
-        if num_tiles_w < 1: num_tiles_w = 1
-        if num_tiles_h < 1: num_tiles_h = 1
-            
-        # Calculate final tile dimensions using integer ceiling division
-        tile_width = (upscaled_total_width + num_tiles_w - 1) // num_tiles_w
-        tile_height = (upscaled_total_height + num_tiles_h - 1) // num_tiles_h
-        
-        # Ensure tile dimensions are at least 1 (final safety clamp)
-        if tile_width <= 0:
-             print(f"Warning: Calculated tile width was {tile_width}. Clamping to minimum 1.")
-             tile_width = 1
-        if tile_height <= 0:
-             print(f"Warning: Calculated tile height was {tile_height}. Clamping to minimum 1.")
-             tile_height = 1
-        
-        print(f"Upscaled image size: {upscaled_total_width}x{upscaled_total_height}")
-        print(f"Tiling grid: {num_tiles_w}x{num_tiles_h} ({num_tiles_w * num_tiles_h} tiles)")
-        print(f"Calculated tile dimensions for upscaled pixel output (upscale_by {upscale_by}): {tile_width}x{tile_height}")
-
-        # --- 5. Return Outputs ---
-        return (
-            latent,
-            tile_width,
-            tile_height,
-            upscale_by
-        )
-
-# --- Advanced Node: BobsLatentNodeAdvanced ---
-class BobsLatentNodeAdvanced:
-    """
-    Generates an empty latent image optimized for various models (FLUX, SDXL, SD3, QWEN, WAN)
-    based on aspect ratio, a continuous float megapixel size, and batch size.
-    Calculates dimensions by rounding to the NEAREST multiple appropriate for the selected model.
-    Handles the correct number of latent channels (4 for most, 16 for FLUX).
-    Calculates tile dimensions for tiling of the *upscaled pixel output*
-    to help optimize tiled upscale times. Aims for a 2x2 grid (4 tiles) unless
-    individual tiles would exceed 2048x2048, in which case more tiles are used.
-    """
-    def __init__(self):
-        pass
-
-    @classmethod
-    def INPUT_TYPES(cls):
+    @staticmethod
+    def _shared_inputs():
         return {
-            "required": {
-                "aspect_ratio": ("STRING", {"default": "1:1", "tooltip": "Target image aspect ratio (e.g., '1:1', '16:9', '3:2'). This determines the shape of the BASE latent image."}),
-                "mp_size_float": ("FLOAT", {"default": 1.0, "min": 0.01, "max": 4.0, "step": 0.01, "display": "number", "tooltip": f"Target megapixel area (in millions of pixels, based on {int(MP_BASE_AREA/1000000)} MP = {MP_BASE_AREA} pixels) for the BASE latent image. Range 0.01 to 4.0 (4.0 is 2048x2048 area)."}),
-                "upscale_by": ("FLOAT", {
+            "upscale_by": (
+                "FLOAT",
+                {
                     "default": 2.0,
                     "min": 1.0,
                     "max": 10.0,
-                    "step": .01,
-                    "tooltip": "Desired upscale factor for the FINAL output image. Used to calculate tiling dimensions in pixel space. Does NOT upscale the generated latent."
-                }),
-                "model_type": (["FLUX", "SDXL", "SD3", "QWEN", "WAN"], {"default": "FLUX", "tooltip": "Select model to set resolution rounding rules and latent channels (FLUX=16, QWEN=round to 28, others=4 channels & round to 64)."}),
-                "batch_size": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1, "tooltip": "Number of latent images in the batch."})
-            }
+                    "step": 0.01,
+                    "tooltip": (
+                        "Upscale factor for the FINAL output image. Used only to compute the "
+                        "tile dimensions; the generated latent is NOT upscaled."
+                    ),
+                },
+            ),
+            "model_type": (
+                MODEL_TYPES,
+                {
+                    "default": "FLUX",
+                    "tooltip": (
+                        "Model family. Sets latent channels (SDXL=4, FLUX/SD3/QWEN/WAN=16) and "
+                        "pixel alignment (64 for FLUX/SDXL/SD3, 16 for QWEN/WAN)."
+                    ),
+                },
+            ),
+            "batch_size": (
+                "INT",
+                {"default": 1, "min": 1, "max": 64, "step": 1, "tooltip": "Number of latents in the batch."},
+            ),
         }
 
-    RETURN_TYPES = ("LATENT", "INT", "INT", "FLOAT")
-    RETURN_NAMES = ("latent", "tile_width", "tile_height", "upscale_by")
-    FUNCTION = "generate"
-    CATEGORY = "latent/generate"
+    @staticmethod
+    def _optional_inputs():
+        return {
+            "max_tile_size": (
+                "INT",
+                {
+                    "default": MAX_TILE_DIM,
+                    "min": 256,
+                    "max": 8192,
+                    "step": 64,
+                    "tooltip": (
+                        "Largest tile edge allowed before the tile grid is subdivided further. "
+                        "Lower this if your upscaler runs out of VRAM."
+                    ),
+                },
+            ),
+        }
 
-    def generate(self, aspect_ratio, mp_size_float, upscale_by, model_type, batch_size):
+    def _build(self, aspect_ratio, target_area, upscale_by, model_type, batch_size, max_tile_size):
+        spec = MODEL_SPECS.get(model_type)
+        if spec is None:
+            raise ValueError(
+                f"Unknown model_type {model_type!r}. Expected one of {', '.join(MODEL_TYPES)}."
+            )
 
-        # --- 1. Calculate Target BASE Pixel Dimensions ---
-        try:
-            ratio_w, ratio_h = map(int, aspect_ratio.split(":"))
-            if ratio_h == 0: # Prevent division by zero
-                 raise ValueError("Height ratio cannot be zero.")
-            aspect_ratio_multiplier = (ratio_w / ratio_h)
-        except ValueError as e:
-            raise ValueError(f"Invalid aspect ratio format: {aspect_ratio}. Please use the format 'x:y' where x and y are integers (e.g., '1:1', '16:9'). Detail: {e}")
+        aspect_ratio_multiplier = parse_aspect_ratio(aspect_ratio)
+        width, height = compute_base_dimensions(target_area, aspect_ratio_multiplier, spec["align"])
 
-        target_area = mp_size_float * MP_BASE_AREA
-
-        initial_target_width_float = math.sqrt(target_area * aspect_ratio_multiplier)
-        initial_target_height_float = initial_target_width_float / aspect_ratio_multiplier
-
-        # --- 2. Apply Model-Specific BASE Sizing and Get Latent Channels ---
-        vae_scale_factor = 8
-        
-        if model_type == "FLUX":
-            latent_channels = 16
-            target_width = round_to_nearest_multiple(initial_target_width_float, 64)
-            target_height = round_to_nearest_multiple(initial_target_height_float, 64)
-        
-        elif model_type == "QWEN":
-            latent_channels = 4
-            target_width = round_to_nearest_multiple(initial_target_width_float, 28)
-            target_height = round_to_nearest_multiple(initial_target_height_float, 28)
-            
-        elif model_type == "SDXL" or model_type == "WAN":
-            latent_channels = 4
-            target_width = round_to_nearest_multiple(initial_target_width_float, 64)
-            target_height = round_to_nearest_multiple(initial_target_height_float, 64)
-        
-        elif model_type == "SD3":
-            latent_channels = 4
-            # First, round to 64 as a base
-            temp_width = round_to_nearest_multiple(initial_target_width_float, 64)
-            temp_height = round_to_nearest_multiple(initial_target_height_float, 64)
-            
-            # Then apply SD3 specific scaling logic
-            target_area_sd3_ref = 1024 * 1024
-            current_area = temp_width * temp_height
-            if current_area > 0:
-                 scaling_factor = (target_area_sd3_ref / current_area) ** 0.5
-                 target_width = int(temp_width * scaling_factor)
-                 target_height = int(temp_height * scaling_factor)
-                 # And re-round to 64
-                 target_width = round_to_nearest_multiple(target_width, 64)
-                 target_height = round_to_nearest_multiple(target_height, 64)
-            else:
-                 print(f"Warning: Calculated base dimensions were zero after initial rounding, skipping SD3 scaling.")
-                 target_width = temp_width
-                 target_height = temp_height
-
-        min_dim = 64
-        if target_width < min_dim:
-             print(f"Warning: Calculated base width was {target_width}. Clamping to minimum {min_dim}.")
-             target_width = min_dim
-        if target_height < min_dim:
-             print(f"Warning: Calculated base height was {target_height}. Clamping to minimum {min_dim}.")
-             target_height = min_dim
-
-        # --- 3. Generate Empty Latent Image at BASE Resolution with Correct Channels ---
-        latent_width = target_width // vae_scale_factor
-        latent_height = target_height // vae_scale_factor
+        latent_width = width // VAE_SCALE_FACTOR
+        latent_height = height // VAE_SCALE_FACTOR
+        channels = spec["channels"]
 
         try:
-            latent_tensor = torch.zeros([batch_size, latent_channels, latent_height, latent_width])
-            latent = {"samples": latent_tensor}
-        except Exception as e:
-             raise RuntimeError(f"Error creating empty latent tensor with shape [{batch_size}, {latent_channels}, {latent_height}, {latent_width}] for {model_type}: {e}")
+            samples = torch.zeros(
+                [batch_size, channels, latent_height, latent_width],
+                device=_latent_device(),
+            )
+        except Exception as error:
+            raise RuntimeError(
+                f"Could not allocate latent of shape "
+                f"[{batch_size}, {channels}, {latent_height}, {latent_width}] for {model_type}: {error}"
+            )
 
-        print(f"Generated {model_type} base latent: Batch={batch_size}, Channels={latent_channels}, Latent Size=({latent_width}x{latent_height}), Base Pixel Size=({target_width}x{target_height})")
-
-        # --- 4. Calculate Tile Dimensions for Tiling of the FINAL Upscaled Pixel Output ---
-        upscaled_total_width = int(target_width * upscale_by)
-        upscaled_total_height = int(target_height * upscale_by)
-
-        MAX_TILE_DIM = 2048
-
-        num_tiles_w = 2
-        num_tiles_h = 2
-
-        hypothetical_tile_w_for_2x2 = (upscaled_total_width + num_tiles_w - 1) // num_tiles_w
-        hypothetical_tile_h_for_2x2 = (upscaled_total_height + num_tiles_h - 1) // num_tiles_h
-        
-        if hypothetical_tile_w_for_2x2 > MAX_TILE_DIM:
-            num_tiles_w = int(math.ceil(upscaled_total_width / MAX_TILE_DIM))
-        
-        if hypothetical_tile_h_for_2x2 > MAX_TILE_DIM:
-            num_tiles_h = int(math.ceil(upscaled_total_height / MAX_TILE_DIM))
-        
-        if num_tiles_w < 1: num_tiles_w = 1
-        if num_tiles_h < 1: num_tiles_h = 1
-            
-        tile_width = (upscaled_total_width + num_tiles_w - 1) // num_tiles_w
-        tile_height = (upscaled_total_height + num_tiles_h - 1) // num_tiles_h
-        
-        if tile_width <= 0:
-             print(f"Warning: Calculated tile width was {tile_width}. Clamping to minimum 1.")
-             tile_width = 1
-        if tile_height <= 0:
-             print(f"Warning: Calculated tile height was {tile_height}. Clamping to minimum 1.")
-             tile_height = 1
-        
-        print(f"Upscaled image size: {upscaled_total_width}x{upscaled_total_height}")
-        print(f"Tiling grid: {num_tiles_w}x{num_tiles_h} ({num_tiles_w * num_tiles_h} tiles)")
-        print(f"Calculated tile dimensions for upscaled pixel output (upscale_by {upscale_by}): {tile_width}x{tile_height}")
-
-        # --- 5. Return Outputs ---
-        return (
-            latent,
-            tile_width,
-            tile_height,
-            upscale_by
+        tile_width, tile_height, tiles_x, tiles_y = compute_tile_dimensions(
+            width, height, upscale_by, max_tile_size
         )
 
-# --- NODE MAPPINGS ---
+        logger.info(
+            "Bobs Latent Optimizer: %s %dx%d px (latent %dx%d, %d channels, batch %d) -> "
+            "upscaled %dx%d px in a %dx%d grid of %dx%d tiles",
+            model_type,
+            width,
+            height,
+            latent_width,
+            latent_height,
+            channels,
+            batch_size,
+            int(width * upscale_by),
+            int(height * upscale_by),
+            tiles_x,
+            tiles_y,
+            tile_width,
+            tile_height,
+        )
+
+        return ({"samples": samples}, tile_width, tile_height, upscale_by, width, height)
+
+
+class BobsLatentNode(_BobsLatentBase):
+    """Generate an empty latent from an aspect ratio and a preset megapixel area.
+
+    Pixel dimensions are rounded to the nearest alignment step for the selected
+    model family, and the latent is allocated with that family's channel count.
+    Also returns tile dimensions for a downstream tiled upscaler, targeting a
+    2x2 grid unless that would push a tile past `max_tile_size`.
+    """
+
+    DESCRIPTION = (
+        "Empty latent sized for FLUX / SDXL / SD3 / Qwen / Wan from an aspect ratio and a "
+        "preset megapixel area, plus suggested tile dimensions for tiled upscaling."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        required = {
+            "aspect_ratio": (
+                "STRING",
+                {
+                    "default": "1:1",
+                    "tooltip": "Aspect ratio of the base image, e.g. '1:1', '16:9', '3:2'.",
+                },
+            ),
+            "mp_size": (
+                MP_SIZES,
+                {
+                    "default": "1",
+                    "tooltip": (
+                        "Approximate megapixel area of the base image. Values map to common "
+                        "standard resolution areas (1 = 1024x1024, 4 = 2048x2048)."
+                    ),
+                },
+            ),
+        }
+        required.update(cls._shared_inputs())
+        return {"required": required, "optional": cls._optional_inputs()}
+
+    def generate(self, aspect_ratio, mp_size, upscale_by, model_type, batch_size, max_tile_size=MAX_TILE_DIM):
+        target_area = MP_SIZE_TO_AREA.get(mp_size)
+        if target_area is None:
+            raise ValueError(
+                f"Unknown mp_size {mp_size!r}. Expected one of {', '.join(MP_SIZES)}."
+            )
+        return self._build(aspect_ratio, target_area, upscale_by, model_type, batch_size, max_tile_size)
+
+
+class BobsLatentNodeAdvanced(_BobsLatentBase):
+    """Same as Bobs Latent Optimizer, but with a continuous megapixel target.
+
+    Use this when you want an exact area rather than one of the presets.
+    """
+
+    DESCRIPTION = (
+        "Empty latent sized for FLUX / SDXL / SD3 / Qwen / Wan from an aspect ratio and a "
+        "continuous megapixel target, plus suggested tile dimensions for tiled upscaling."
+    )
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        required = {
+            "aspect_ratio": (
+                "STRING",
+                {
+                    "default": "1:1",
+                    "tooltip": "Aspect ratio of the base image, e.g. '1:1', '16:9', '3:2'.",
+                },
+            ),
+            "mp_size_float": (
+                "FLOAT",
+                {
+                    "default": 1.0,
+                    "min": 0.01,
+                    "max": 16.0,
+                    "step": 0.01,
+                    "display": "number",
+                    "tooltip": (
+                        f"Target area in megapixels, where 1.0 = {MP_BASE_AREA} pixels "
+                        "(1024x1024). 4.0 is a 2048x2048 area."
+                    ),
+                },
+            ),
+        }
+        required.update(cls._shared_inputs())
+        return {"required": required, "optional": cls._optional_inputs()}
+
+    def generate(self, aspect_ratio, mp_size_float, upscale_by, model_type, batch_size, max_tile_size=MAX_TILE_DIM):
+        if mp_size_float <= 0:
+            raise ValueError(f"mp_size_float must be greater than zero, got {mp_size_float}.")
+        return self._build(
+            aspect_ratio, mp_size_float * MP_BASE_AREA, upscale_by, model_type, batch_size, max_tile_size
+        )
+
+
 NODE_CLASS_MAPPINGS = {
     "BobsLatentNode": BobsLatentNode,
-    "BobsLatentNodeAdvanced": BobsLatentNodeAdvanced
+    "BobsLatentNodeAdvanced": BobsLatentNodeAdvanced,
 }
 
-# --- NODE DISPLAY NAMES ---
 NODE_DISPLAY_NAME_MAPPINGS = {
     "BobsLatentNode": "Bobs Latent Optimizer",
-    "BobsLatentNodeAdvanced": "Bobs Latent Optimizer (Advanced)"
+    "BobsLatentNodeAdvanced": "Bobs Latent Optimizer (Advanced)",
 }
-
-# --- END OF FILE Bobs_Latent_Optimizer.py ---
