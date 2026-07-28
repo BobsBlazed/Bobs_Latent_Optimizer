@@ -31,10 +31,11 @@ import logging  # noqa: E402
 blo.logger.setLevel(logging.CRITICAL)
 
 
-# Ground truth transcribed from ComfyUI's comfy/latent_formats.py
-# (latent_channels / spacial_downscale_ratio / temporal_downscale_ratio /
-# latent_dimensions), cross-checked against the matching Empty*Latent* nodes.
-# Keyed by this node's model_type.
+# Ground truth transcribed VERBATIM from ComfyUI's comfy/latent_formats.py, as
+# (latent_channels, spacial_downscale_ratio, temporal_downscale_ratio,
+# latent_dimensions) for the format each model maps to in supported_models.py,
+# cross-checked against the matching Empty*Latent* node where one exists.
+# Keyed by this node's model_type. Nothing here is a judgement call.
 COMFY_REFERENCE = {
     "SD15": (4, 8, 1, 2),
     "SD21": (4, 8, 1, 2),
@@ -48,29 +49,80 @@ COMFY_REFERENCE = {
     "HIDREAM": (16, 8, 1, 2),
     "LUMINA2": (16, 8, 1, 2),
     "OMNIGEN2": (16, 8, 1, 2),
-    "QWEN": (16, 8, 1, 2),
-    "COSMOS_PREDICT2": (16, 8, 1, 2),
+    # QwenImage and CosmosT2IPredict2 map to latent_formats.Wan21, which is 3-D.
+    "QWEN": (16, 8, 4, 3),
+    "COSMOS_PREDICT2": (16, 8, 4, 3),
     "FLUX2": (128, 16, 1, 2),
     "HUNYUAN_IMAGE": (64, 32, 1, 2),
     "CHROMA_RADIANCE": (3, 1, 1, 2),
+    "HIDREAM_O1": (3, 1, 1, 2),
+    "ZIMAGE_PIXEL": (3, 1, 1, 2),
+    "PIXELDIT": (3, 1, 1, 2),
     "WAN": (16, 8, 4, 3),
     "WAN22": (48, 16, 4, 3),
     "HUNYUAN_VIDEO": (16, 8, 4, 3),
+    "HUNYUAN_VIDEO_15": (32, 16, 4, 3),
     "COSMOS": (16, 8, 8, 3),
+    "COGVIDEOX": (16, 8, 4, 3),
     "MOCHI": (12, 8, 6, 3),
     "LTXV": (128, 32, 8, 3),
+    "SEEDVR2": (16, 8, 1, 3),
+    "HUNYUAN_IMAGE_REFINER": (64, 8, 1, 3),
 }
+
+# Deliberate deviations from the table above, with the reason. Keeping these
+# separate is the point: it stops the reference table from quietly absorbing a
+# judgement call and pretending it came from upstream.
+#
+# Qwen-Image and Cosmos Predict2 (text-to-image) share Wan's VAE, so they
+# inherit latent_formats.Wan21 and its 3-D / temporal-4 declaration. Both are
+# still-image models: ComfyUI's own Qwen workflows build their latent with
+# EmptySD3LatentImage, which is 4-D. We follow the workflow, not the format.
+INTENTIONAL_OVERRIDES = {
+    "QWEN": {"temporal": 1, "dims": 2},
+    "COSMOS_PREDICT2": {"temporal": 1, "dims": 2},
+}
+
+# Models included for their shape only - they are never driven from an empty
+# latent, so selecting them warns.
+NOT_EMPTY_LATENT_WORKFLOWS = {"SEEDVR2", "HUNYUAN_IMAGE_REFINER"}
 
 
 class TestModelSpecs(unittest.TestCase):
     def test_specs_match_comfyui_latent_formats(self):
         self.assertEqual(set(blo.MODEL_SPECS), set(COMFY_REFERENCE))
         for model, (channels, vae_scale, temporal, dims) in COMFY_REFERENCE.items():
+            expected = {
+                "channels": channels,
+                "vae_scale": vae_scale,
+                "temporal": temporal,
+                "dims": dims,
+            }
+            expected.update(INTENTIONAL_OVERRIDES.get(model, {}))
             spec = blo.MODEL_SPECS[model]
-            self.assertEqual(spec["channels"], channels, model)
-            self.assertEqual(spec["vae_scale"], vae_scale, model)
-            self.assertEqual(spec["temporal"], temporal, model)
-            self.assertEqual(spec["dims"], dims, model)
+            for key, value in expected.items():
+                self.assertEqual(spec[key], value, f"{model}.{key}")
+
+    def test_overrides_actually_deviate_from_upstream(self):
+        # If upstream ever changes to agree with us, this override is dead code
+        # and should be deleted rather than left implying a conflict.
+        for model, override in INTENTIONAL_OVERRIDES.items():
+            channels, vae_scale, temporal, dims = COMFY_REFERENCE[model]
+            upstream = {
+                "channels": channels,
+                "vae_scale": vae_scale,
+                "temporal": temporal,
+                "dims": dims,
+            }
+            self.assertTrue(
+                any(upstream[k] != v for k, v in override.items()),
+                f"{model} override no longer deviates from upstream",
+            )
+
+    def test_shape_only_models_are_flagged(self):
+        for model, spec in blo.MODEL_SPECS.items():
+            expected = model not in NOT_EMPTY_LATENT_WORKFLOWS
+            self.assertEqual(spec.get("starts_from_empty", True), expected, model)
 
     def test_alignment_is_a_multiple_of_the_vae_scale(self):
         # This is the invariant that keeps width // vae_scale exact.
@@ -79,10 +131,12 @@ class TestModelSpecs(unittest.TestCase):
             self.assertGreater(spec["align"], 0, model)
 
     def test_video_model_list_is_derived_correctly(self):
-        self.assertEqual(
-            set(blo.VIDEO_MODEL_TYPES),
-            {m for m, (_, _, _, dims) in COMFY_REFERENCE.items() if dims == 3},
-        )
+        expected = set()
+        for model, (_, _, _, dims) in COMFY_REFERENCE.items():
+            dims = INTENTIONAL_OVERRIDES.get(model, {}).get("dims", dims)
+            if dims == 3:
+                expected.add(model)
+        self.assertEqual(set(blo.VIDEO_MODEL_TYPES), expected)
 
 
 class TestParseAspectRatio(unittest.TestCase):
@@ -231,14 +285,46 @@ class TestNodes(unittest.TestCase):
         self.assertEqual(len(latent["samples"].shape), 4)
         self.assertTrue(any("length=48 ignored" in line for line in captured.output))
 
-    def test_chroma_radiance_is_pixel_space(self):
+    def test_pixel_space_models_have_no_downscale(self):
         # vae_scale of 1 means the latent dims equal the pixel dims.
-        latent, _, _, _, width, height = blo.BobsLatentNode().generate(
-            "1:1", "1", 2.0, "CHROMA_RADIANCE", 1
-        )
-        _, channels, latent_h, latent_w = latent["samples"].shape
-        self.assertEqual(channels, 3)
-        self.assertEqual((latent_w, latent_h), (width, height))
+        node = blo.BobsLatentNode()
+        for model in ("CHROMA_RADIANCE", "HIDREAM_O1", "ZIMAGE_PIXEL", "PIXELDIT"):
+            latent, _, _, _, width, height = node.generate("1:1", "1", 2.0, model, 1)
+            _, channels, latent_h, latent_w = latent["samples"].shape
+            self.assertEqual(channels, 3, model)
+            self.assertEqual((latent_w, latent_h), (width, height), model)
+
+    def test_shape_only_models_warn_when_selected(self):
+        node = blo.BobsLatentNode()
+        for model in sorted(NOT_EMPTY_LATENT_WORKFLOWS):
+            with self.assertLogs(blo.logger, level="WARNING") as captured:
+                node.generate("1:1", "1", 2.0, model, 1)
+            self.assertTrue(
+                any("not normally driven from an empty latent" in line for line in captured.output),
+                model,
+            )
+
+    def test_ordinary_models_do_not_warn(self):
+        # assertNoLogs is 3.10+, and this suite supports 3.9, so capture manually.
+        records = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = _Capture(level=logging.WARNING)
+        previous = blo.logger.level
+        blo.logger.setLevel(logging.WARNING)
+        blo.logger.addHandler(handler)
+        try:
+            node = blo.BobsLatentNode()
+            for model in ("FLUX", "SDXL", "WAN", "LTXV"):
+                node.generate("1:1", "1", 2.0, model, 1)
+        finally:
+            blo.logger.removeHandler(handler)
+            blo.logger.setLevel(previous)
+
+        self.assertEqual([r.getMessage() for r in records], [])
 
     def test_high_compression_models(self):
         node = blo.BobsLatentNode()

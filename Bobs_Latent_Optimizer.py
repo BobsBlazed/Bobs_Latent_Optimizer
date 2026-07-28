@@ -39,8 +39,17 @@ MAX_TILE_DIM = 2048
 #               dimensions actually describe the tensor we return
 #   temporal  - temporal downscale (temporal_downscale_ratio); video models only
 #   dims      - 2 for image models ([B,C,H,W]), 3 for video ([B,C,T,H,W])
+#   starts_from_empty - False for models that are never driven from an empty
+#               latent (refiners, restorers). Defaults to True.
 #
 # Video latents use ComfyUI's frame formula: ((length - 1) // temporal) + 1.
+#
+# Two entries deliberately deviate from the format they map to. QWEN and
+# COSMOS_PREDICT2 both use latent_formats.Wan21, which declares
+# latent_dimensions=3 and temporal_downscale_ratio=4, because they share Wan's
+# VAE. Both are still-image models though - ComfyUI's own Qwen workflows use
+# EmptySD3LatentImage, which is 4-D - so we follow the workflow rather than the
+# shared format and treat them as 2-D.
 MODEL_SPECS = {
     # --- 4-channel SD-family VAE ---
     "SD15": {"channels": 4, "vae_scale": 8, "align": 64, "temporal": 1, "dims": 2},
@@ -61,15 +70,33 @@ MODEL_SPECS = {
     # --- high-channel / high-compression image models ---
     "FLUX2": {"channels": 128, "vae_scale": 16, "align": 64, "temporal": 1, "dims": 2},
     "HUNYUAN_IMAGE": {"channels": 64, "vae_scale": 32, "align": 64, "temporal": 1, "dims": 2},
-    # Chroma Radiance works directly in pixel space - no VAE downscale at all.
+    # --- pixel-space image models: no VAE at all, so the "latent" IS the image.
+    # Alignment of 16 matches the step on ComfyUI's own pixel-space latent node.
     "CHROMA_RADIANCE": {"channels": 3, "vae_scale": 1, "align": 16, "temporal": 1, "dims": 2},
+    "HIDREAM_O1": {"channels": 3, "vae_scale": 1, "align": 16, "temporal": 1, "dims": 2},
+    "ZIMAGE_PIXEL": {"channels": 3, "vae_scale": 1, "align": 16, "temporal": 1, "dims": 2},
+    "PIXELDIT": {"channels": 3, "vae_scale": 1, "align": 16, "temporal": 1, "dims": 2},
     # --- video models (5-D latents; use the `length` input) ---
     "WAN": {"channels": 16, "vae_scale": 8, "align": 16, "temporal": 4, "dims": 3},
     "WAN22": {"channels": 48, "vae_scale": 16, "align": 32, "temporal": 4, "dims": 3},
     "HUNYUAN_VIDEO": {"channels": 16, "vae_scale": 8, "align": 16, "temporal": 4, "dims": 3},
+    "HUNYUAN_VIDEO_15": {"channels": 32, "vae_scale": 16, "align": 32, "temporal": 4, "dims": 3},
     "COSMOS": {"channels": 16, "vae_scale": 8, "align": 16, "temporal": 8, "dims": 3},
+    "COGVIDEOX": {"channels": 16, "vae_scale": 8, "align": 16, "temporal": 4, "dims": 3},
     "MOCHI": {"channels": 12, "vae_scale": 8, "align": 16, "temporal": 6, "dims": 3},
     "LTXV": {"channels": 128, "vae_scale": 32, "align": 32, "temporal": 8, "dims": 3},
+    # --- shape-only: these models are never driven from an empty latent.
+    # SeedVR2 restores existing video (its preprocess node takes an IMAGE), and
+    # the HunyuanImage 2.1 refiner consumes the base model's latent. Included so
+    # the shapes are available, but selecting them logs a warning.
+    "SEEDVR2": {
+        "channels": 16, "vae_scale": 8, "align": 16, "temporal": 1, "dims": 3,
+        "starts_from_empty": False,
+    },
+    "HUNYUAN_IMAGE_REFINER": {
+        "channels": 64, "vae_scale": 8, "align": 16, "temporal": 1, "dims": 3,
+        "starts_from_empty": False,
+    },
 }
 
 MODEL_TYPES = list(MODEL_SPECS.keys())
@@ -318,6 +345,14 @@ class _BobsLatentBase:
         if spec is None:
             raise ValueError(
                 f"Unknown model_type {model_type!r}. Expected one of {', '.join(MODEL_TYPES)}."
+            )
+
+        if not spec.get("starts_from_empty", True):
+            logger.warning(
+                "Bobs Latent Optimizer: %s is not normally driven from an empty latent - it "
+                "consumes an existing image or latent. This gives you a correctly shaped zero "
+                "tensor, but it is probably not the input that model wants.",
+                model_type,
             )
 
         aspect_ratio_multiplier = parse_aspect_ratio(aspect_ratio)

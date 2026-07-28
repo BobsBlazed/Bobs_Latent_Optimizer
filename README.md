@@ -1,6 +1,6 @@
 # Bobs Latent Optimizer for ComfyUI
 
-A pair of custom nodes for ComfyUI that generate empty latents sized correctly for **23 model families** — SD1.5 through Flux2, Qwen-Image, HiDream, HunyuanImage, and video models like Wan, LTXV and Mochi. You give them an aspect ratio and a target megapixel area; they work out pixel dimensions that are legal for the selected model family and allocate the latent with that family's channel count, VAE downscale and rank.
+A pair of custom nodes for ComfyUI that generate empty latents sized correctly for **30 model families** — SD1.5 through Flux2, Qwen-Image, HiDream, HunyuanImage, and video models like Wan, LTXV and Mochi. You give them an aspect ratio and a target megapixel area; they work out pixel dimensions that are legal for the selected model family and allocate the latent with that family's channel count, VAE downscale and rank.
 
 They also calculate **tile dimensions for upscaling workflows**, so you can feed sensible `tile_width` / `tile_height` values straight into a tiled upscaler (Ultimate SD Upscale, Tiled VAE Decode, etc.) instead of guessing.
 
@@ -87,24 +87,47 @@ Every row is taken from ComfyUI's own `comfy/latent_formats.py` (`latent_channel
 | `OMNIGEN2`        | 16       | 8             | 64        | OmniGen2 |
 | `QWEN`            | 16       | 8             | 16        | Qwen-Image |
 | `COSMOS_PREDICT2` | 16       | 8             | 16        | Cosmos Predict2 (text-to-image) |
-| `FLUX2`           | 128      | 16            | 64        | FLUX.2 |
+| `FLUX2`           | 128      | 16            | 64        | FLUX.2, Ideogram4, MageFlow, ErnieImage, Lens |
 | `HUNYUAN_IMAGE`   | 64       | 32            | 64        | HunyuanImage 2.1 |
-| `CHROMA_RADIANCE` | 3        | 1             | 16        | Chroma Radiance (pixel space — no VAE) |
+
+Pixel-space families have no VAE at all, so the "latent" *is* the image. Alignment of 16 matches the step on ComfyUI's own pixel-space latent node.
+
+| `model_type`      | Channels | VAE downscale | Alignment | Covers |
+| ----------------- | -------- | ------------- | --------- | ------ |
+| `CHROMA_RADIANCE` | 3        | 1             | 16        | Chroma Radiance |
+| `HIDREAM_O1`      | 3        | 1             | 16        | HiDream O1 (distinct from `HIDREAM`) |
+| `ZIMAGE_PIXEL`    | 3        | 1             | 16        | Z-Image pixel space |
+| `PIXELDIT`        | 3        | 1             | 16        | PixelDiT T2I, PiD |
 
 #### Video families — latent is `[B, C, T, H/s, W/s]`
 
 `T` is derived from the `length` input as `((length - 1) // temporal) + 1`.
 
-| `model_type`     | Channels | VAE downscale | Temporal | Alignment | Covers |
-| ---------------- | -------- | ------------- | -------- | --------- | ------ |
-| `WAN`            | 16       | 8             | 4        | 16        | Wan 2.1 (T2V, I2V, VACE, Camera, …) |
-| `WAN22`          | 48       | 16            | 4        | 32        | Wan 2.2 T2V |
-| `HUNYUAN_VIDEO`  | 16       | 8             | 4        | 16        | HunyuanVideo, I2V, Skyreels |
-| `COSMOS`         | 16       | 8             | 8        | 16        | Cosmos 1.0 T2V / I2V |
-| `MOCHI`          | 12       | 8             | 6        | 16        | Genmo Mochi |
-| `LTXV`           | 128      | 32            | 8        | 32        | LTX-Video |
+| `model_type`       | Channels | VAE downscale | Temporal | Alignment | Covers |
+| ------------------ | -------- | ------------- | -------- | --------- | ------ |
+| `WAN`              | 16       | 8             | 4        | 16        | Wan 2.1 (T2V, I2V, VACE, Camera, …), Krea2, JoyImage, Anima |
+| `WAN22`            | 48       | 16            | 4        | 32        | Wan 2.2 T2V |
+| `HUNYUAN_VIDEO`    | 16       | 8             | 4        | 16        | HunyuanVideo, I2V, Skyreels, Kandinsky5 |
+| `HUNYUAN_VIDEO_15` | 32       | 16            | 4        | 32        | HunyuanVideo 1.5, SR distilled |
+| `COSMOS`           | 16       | 8             | 8        | 16        | Cosmos 1.0 T2V / I2V |
+| `COGVIDEOX`        | 16       | 8             | 4        | 16        | CogVideoX T2V / I2V / Inpaint |
+| `MOCHI`            | 12       | 8             | 6        | 16        | Genmo Mochi |
+| `LTXV`             | 128      | 32            | 8        | 32        | LTX-Video, LTX-AV |
 
-**Not included:** Stable Cascade needs *two* latents (stage C and stage B) from one node, which doesn't fit this node's single-`LATENT` output. Audio and 3D formats (StableAudio, Hunyuan3D, ACEStep) aren't image/video latents at all.
+#### Shape-only families
+
+These two are included so their shapes are available, but **neither is normally driven from an empty latent** — selecting one logs a warning. SeedVR2 restores existing video (its preprocess node takes an `IMAGE`), and the HunyuanImage 2.1 refiner consumes the base model's latent.
+
+| `model_type`            | Channels | VAE downscale | Temporal | Alignment |
+| ----------------------- | -------- | ------------- | -------- | --------- |
+| `SEEDVR2`               | 16       | 8             | 1        | 16        |
+| `HUNYUAN_IMAGE_REFINER` | 64       | 8             | 1        | 16        |
+
+#### Two deliberate deviations from upstream
+
+`QWEN` and `COSMOS_PREDICT2` map to `latent_formats.Wan21`, which declares `latent_dimensions = 3` and `temporal_downscale_ratio = 4` — they inherit it because they share Wan's VAE. Both are still-image models, and ComfyUI's own Qwen workflows build their latent with `EmptySD3LatentImage`, which is 4-D. This node follows the workflow rather than the shared format and treats both as 2-D. The test suite keeps the verbatim upstream values and the override in separate tables, so the deviation stays visible rather than being absorbed into the "transcribed from ComfyUI" claim.
+
+**Not included:** Stable Cascade needs *two* latents (stage C and stage B) from one node, which doesn't fit this node's single-`LATENT` output. Audio and 3D formats (StableAudio, Hunyuan3D, ACEStep, TripoSplat) aren't image/video latents at all.
 
 ### Example Workflow
 
@@ -141,6 +164,15 @@ python -m unittest discover -s tests -v
 ```
 
 ## Changelog
+
+### 1.5.0
+
+*   **Added 7 more model families**, taking the total from 23 to 30 and closing the gap against ComfyUI `master`:
+    *   Pixel-space image: `HIDREAM_O1`, `ZIMAGE_PIXEL`, `PIXELDIT` (3 channels, no VAE downscale).
+    *   Video: `HUNYUAN_VIDEO_15` (32ch, 16×), `COGVIDEOX`.
+    *   Shape-only: `SEEDVR2` and `HUNYUAN_IMAGE_REFINER`, which are **not** empty-latent workflows — selecting either logs a warning explaining that the model consumes an existing image or latent.
+*   **Fixed a provenance overclaim in the test suite.** `COMFY_REFERENCE` was documented as transcribed from ComfyUI's `latent_formats.py`, but the `QWEN` and `COSMOS_PREDICT2` rows silently encoded a judgement call (treating them as 2-D despite `latent_formats.Wan21` declaring 3-D). The table now holds verbatim upstream values, with the deviation isolated in `INTENTIONAL_OVERRIDES` alongside its justification, plus a test asserting each override still genuinely deviates — so it becomes dead code to delete if upstream ever agrees. The node's behaviour is unchanged; only the claim about where the numbers came from is now accurate.
+*   **Documented which models each family covers.** Newer models that reuse an existing format (Ideogram4, MageFlow, ErnieImage and Lens on Flux2; Krea2, JoyImage and Anima on Wan21; LongCat and Kandinsky5Image on Flux) already worked but weren't discoverable — they're now named in the reference tables.
 
 ### 1.4.0
 

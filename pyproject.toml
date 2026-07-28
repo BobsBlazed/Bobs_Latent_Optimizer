@@ -1,7 +1,7 @@
 [project]
 name = "bobs_latent_optimizer"
-description = "This custom node for ComfyUI is designed to optimize latent generation for 23 model families, including FLUX, Flux2, SDXL, SD3, Qwen-Image, HiDream, Chroma, Lumina2, HunyuanImage, Wan, LTXV and Mochi. It provides flexible control over aspect ratios, megapixel sizes, video length and upscale factors, allowing users to dynamically create latents that fit specific tiling and resolution needs."
-version = "1.4.0"
+description = "This custom node for ComfyUI is designed to optimize latent generation across 30 image and video model families, including FLUX, Flux2, SDXL, SD3, Qwen-Image, HiDream, Chroma, Lumina2, HunyuanImage, Wan, HunyuanVideo, CogVideoX, LTXV and Mochi. It provides flexible control over aspect ratios, megapixel sizes, video length and upscale factors, allowing users to dynamically create latents that fit specific tiling and resolution needs."
+version = "1.5.0"
 license = {file = "LICENSE"}
 requires-python = ">=3.9"
 # torch is intentionally not declared: it is provided by the ComfyUI runtime and
