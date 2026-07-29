@@ -14,10 +14,21 @@ if "torch" not in sys.modules:
     torch_stub = types.ModuleType("torch")
 
     class _FakeTensor:
-        def __init__(self, shape):
+        def __init__(self, shape, device=None, dtype=None):
             self.shape = tuple(shape)
+            self.device = device
+            # Sentinel so tests can tell "dtype was not passed" from "passed None".
+            self.dtype_was_passed = dtype is not _MISSING
+            self.dtype = None if dtype is _MISSING else dtype
 
-    torch_stub.zeros = lambda shape, device=None: _FakeTensor(shape)
+    class _Missing:
+        pass
+
+    _MISSING = _Missing()
+
+    torch_stub.zeros = lambda shape, device=None, dtype=_MISSING: _FakeTensor(
+        shape, device, dtype
+    )
     torch_stub.device = lambda name: name
     sys.modules["torch"] = torch_stub
 
@@ -141,7 +152,7 @@ class TestModelSpecs(unittest.TestCase):
 
 class TestParseAspectRatio(unittest.TestCase):
     def test_common_formats(self):
-        for text in ("16:9", "16/9", "16x9", "16,9"):
+        for text in ("16:9", "16/9", "16x9", "16X9"):
             self.assertAlmostEqual(blo.parse_aspect_ratio(text), 16 / 9, msg=text)
 
     def test_decimal_components_and_bare_number(self):
@@ -153,6 +164,14 @@ class TestParseAspectRatio(unittest.TestCase):
 
     def test_rejects_bad_input(self):
         for text in ("", "1:0", "abc", "-16:9", "1:2:3", "0:1"):
+            with self.assertRaises(ValueError, msg=text):
+                blo.parse_aspect_ratio(text)
+
+    def test_comma_is_rejected_rather_than_silently_misread(self):
+        # Regression: "," used to be a separator, so a decimal-comma locale
+        # typing "1,5" (meaning 1.5) silently got 1:5 = 0.2 instead. An error is
+        # the only safe answer when the input is genuinely ambiguous.
+        for text in ("1,5", "16,9"):
             with self.assertRaises(ValueError, msg=text):
                 blo.parse_aspect_ratio(text)
 
@@ -183,6 +202,62 @@ class TestComputeBaseDimensions(unittest.TestCase):
             blo.compute_base_dimensions(0, 1.0, 64)
         with self.assertRaises(ValueError):
             blo.compute_base_dimensions(1024, 1.0, 0)
+        with self.assertRaises(ValueError):
+            # max_dim below one alignment step has no valid answer.
+            blo.compute_base_dimensions(1024 * 1024, 1.0, 64, max_dim=32)
+
+    def test_never_exceeds_comfyui_resolution_limit(self):
+        # ComfyUI caps width/height at MAX_RESOLUTION (16384); anything larger
+        # blows up later in the sampler or VAE decode, far from the cause.
+        for model, spec in blo.MODEL_SPECS.items():
+            for ratio in ("100:1", "1000:1", "1:1000"):
+                multiplier = blo.parse_aspect_ratio(ratio)
+                for area in (1024 * 1024, 16 * 1024 * 1024):
+                    width, height = blo.compute_base_dimensions(
+                        area, multiplier, spec["align"]
+                    )
+                    self.assertLessEqual(width, blo.MAX_DIMENSION, (model, ratio))
+                    self.assertLessEqual(height, blo.MAX_DIMENSION, (model, ratio))
+                    self.assertEqual(width % spec["align"], 0, (model, ratio))
+                    self.assertEqual(height % spec["align"], 0, (model, ratio))
+
+    def test_ceiling_scaling_preserves_the_ratio_when_it_can(self):
+        # Only the width is over the limit here, so the ratio should survive.
+        multiplier = blo.parse_aspect_ratio("4:1")
+        width, height = blo.compute_base_dimensions(64 * 1024 * 1024, multiplier, 64)
+        self.assertLessEqual(width, blo.MAX_DIMENSION)
+        self.assertAlmostEqual(width / height, 4.0, delta=0.05)
+
+    def test_hitting_the_ceiling_warns(self):
+        with self.assertLogs(blo.logger, level="WARNING") as captured:
+            blo.compute_base_dimensions(16 * 1024 * 1024, 1000.0, 64)
+        self.assertTrue(any("exceeds the" in line for line in captured.output))
+
+    def test_hitting_the_floor_warns(self):
+        with self.assertLogs(blo.logger, level="WARNING") as captured:
+            blo.compute_base_dimensions(1024, 1000.0, 64)
+        self.assertTrue(any("below the" in line for line in captured.output))
+
+    def test_ordinary_sizes_do_not_warn(self):
+        records = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record)
+
+        handler = _Capture(level=logging.WARNING)
+        previous = blo.logger.level
+        blo.logger.setLevel(logging.WARNING)
+        blo.logger.addHandler(handler)
+        try:
+            for ratio in (1.0, 16 / 9, 9 / 16, 3 / 2, 2 / 3):
+                for area in (512 * 512, 1024 * 1024, 2048 * 2048):
+                    blo.compute_base_dimensions(area, ratio, 64)
+        finally:
+            blo.logger.removeHandler(handler)
+            blo.logger.setLevel(previous)
+
+        self.assertEqual([r.getMessage() for r in records], [])
 
 
 class TestComputeLatentFrames(unittest.TestCase):
@@ -284,6 +359,19 @@ class TestNodes(unittest.TestCase):
             latent, _, _, _, _, _ = node.generate("1:1", "1", 2.0, "FLUX", 1, length=48)
         self.assertEqual(len(latent["samples"].shape), 4)
         self.assertTrue(any("length=48 ignored" in line for line in captured.output))
+
+    def test_dtype_is_passed_for_image_families_only(self):
+        # Matches ComfyUI: EmptyLatentImage / EmptySD3LatentImage pass
+        # dtype=intermediate_dtype(); the video latent nodes pass only device.
+        # Outside ComfyUI there is no intermediate_dtype(), so nothing is passed.
+        node = blo.BobsLatentNode()
+        expect_dtype = blo._latent_dtype() is not None
+        for model, spec in blo.MODEL_SPECS.items():
+            latent, _, _, _, _, _ = node.generate("1:1", "1", 2.0, model, 1)
+            samples = latent["samples"]
+            self.assertEqual(
+                samples.dtype_was_passed, expect_dtype and spec["dims"] == 2, model
+            )
 
     def test_pixel_space_models_have_no_downscale(self):
         # vae_scale of 1 means the latent dims equal the pixel dims.

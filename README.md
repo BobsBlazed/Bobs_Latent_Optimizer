@@ -6,7 +6,7 @@ They also calculate **tile dimensions for upscaling workflows**, so you can feed
 
 ## Features
 
-*   **Aspect Ratio Control:** `1:1`, `16:9`, `3:2`, `13:19`, `85:110`, and so on. `16/9`, `16x9` and decimal components like `1.5:1` are accepted too.
+*   **Aspect Ratio Control:** `1:1`, `16:9`, `3:2`, `13:19`, `85:110`, and so on. `16/9`, `16x9` and decimal components like `1.5:1` are accepted too. A comma is deliberately rejected — `1,5` is a decimal in many locales, so guessing would risk silently reading it as `1:5`.
 *   **Megapixel-Based Sizing:**
     *   **Standard Node:** pick from a list of approximate megapixel areas (0.25MP … 4MP).
     *   **Advanced Node:** a continuous float for an exact target area.
@@ -164,6 +164,16 @@ python -m unittest discover -s tests -v
 ```
 
 ## Changelog
+
+### 1.5.1
+
+Fixes from a review of the 1.3.0–1.5.0 work. No shape changes — `FLUX 16:9 @1MP` is still `1344x768`, and every model's channel count, downscale and rank are untouched.
+
+*   **Fixed a silent wrong answer in aspect-ratio parsing.** `,` was treated as a separator, so in decimal-comma locales `1,5` (meaning 1.5) was read as `1:5` = 0.2 — a 7.5× wrong ratio with no error. Before 1.3.0 this raised a clear `ValueError`; the comma is now rejected again. **If you were relying on `16,9`, use `16:9`.**
+*   **Fixed dimensions exceeding ComfyUI's resolution limit.** There was no upper bound, so an extreme aspect ratio could emit sizes far past `MAX_RESOLUTION` (16384) — `1000:1` at 1MP produced 32384px wide. That allocates a small latent but fails much later, in the sampler or VAE decode, a long way from the aspect ratio that caused it. Dimensions are now scaled to fit the ceiling with the aspect ratio preserved where possible.
+*   **Fixed silent clamping.** Both the minimum and the new maximum distort the requested ratio or area, so each now warns. The pre-1.3.0 code warned on the minimum clamp and the rewrite had dropped it.
+*   **Fixed a fidelity gap against `EmptyLatentImage`.** Image families now allocate with `dtype=comfy.model_management.intermediate_dtype()`, matching `EmptyLatentImage` and `EmptySD3LatentImage`. Video families still pass only `device`, matching ComfyUI's video latent nodes.
+*   Tests grow from 45 to 52, covering the resolution ceiling, both clamp warnings, comma rejection, and the dtype split — the gaps that let the two clamping bugs through.
 
 ### 1.5.0
 
