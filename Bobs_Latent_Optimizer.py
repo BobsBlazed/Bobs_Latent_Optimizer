@@ -30,6 +30,12 @@ MP_BASE_AREA = 1024 * 1024
 
 MAX_TILE_DIM = 2048
 
+# Mirrors MAX_RESOLUTION in ComfyUI's nodes.py. Every built-in latent node caps
+# its width/height widgets at this, so emitting anything larger produces a
+# latent that fails later - in the sampler or VAE decode - a long way from the
+# aspect ratio that actually caused it.
+MAX_DIMENSION = 16384
+
 # Model table.
 #
 #   channels  - latent channel count (latent_formats.latent_channels)
@@ -122,7 +128,10 @@ MP_SIZES = list(MP_SIZE_TO_AREA.keys())
 
 TILE_ALIGN = 8
 
-_ASPECT_SEPARATORS = (":", "/", "x", "X", ",")
+# "," is deliberately NOT a separator. In decimal-comma locales "1,5" means 1.5,
+# and treating the comma as a separator would silently read that as 1:5 = 0.2 -
+# a 7.5x wrong aspect ratio with no error. Rejecting it is the safer default.
+_ASPECT_SEPARATORS = (":", "/", "x", "X")
 
 
 def round_to_nearest_multiple(value, multiple):
@@ -135,8 +144,9 @@ def round_to_nearest_multiple(value, multiple):
 def parse_aspect_ratio(aspect_ratio):
     """Parse an aspect ratio string into a width/height multiplier.
 
-    Accepts "16:9", "16/9", "16x9", "16,9" and decimal components such as
-    "1.5:1". A bare number ("1.777") is treated as the ratio itself.
+    Accepts "16:9", "16/9", "16x9" and decimal components such as "1.5:1".
+    A bare number ("1.777") is treated as the ratio itself. A comma is not a
+    separator - see _ASPECT_SEPARATORS.
     """
     if isinstance(aspect_ratio, (int, float)):
         parts = [str(aspect_ratio)]
@@ -179,22 +189,56 @@ def parse_aspect_ratio(aspect_ratio):
     return ratio
 
 
-def compute_base_dimensions(target_area, aspect_ratio_multiplier, align):
+def compute_base_dimensions(target_area, aspect_ratio_multiplier, align, max_dim=MAX_DIMENSION):
     """Return (width, height) in pixels covering ~`target_area`, aligned to `align`.
 
-    Both dimensions are clamped to at least one full alignment step so tiny
-    megapixel targets cannot produce a zero-sized latent.
+    Dimensions are held between one full alignment step and `max_dim` (ComfyUI's
+    resolution ceiling). Both bounds distort the requested aspect ratio or area,
+    so each one warns when it bites rather than adjusting the result silently.
     """
     if target_area <= 0:
         raise ValueError(f"Target area must be positive, got {target_area}.")
     if align <= 0:
         raise ValueError(f"Alignment must be positive, got {align}.")
 
+    ceiling = (int(max_dim) // align) * align
+    if ceiling < align:
+        raise ValueError(
+            f"max_dim ({max_dim}) is smaller than one alignment step ({align})."
+        )
+
     width = math.sqrt(target_area * aspect_ratio_multiplier)
     height = width / aspect_ratio_multiplier
 
-    width = max(align, round_to_nearest_multiple(width, align))
-    height = max(align, round_to_nearest_multiple(height, align))
+    # Scale down before aligning so the aspect ratio survives the ceiling; only
+    # then clamp, which can still distort it when the other side is at the floor.
+    overshoot = max(width / ceiling, height / ceiling, 1.0)
+    if overshoot > 1.0:
+        logger.warning(
+            "Bobs Latent Optimizer: %.0fx%.0f px exceeds the %d px limit; scaling down "
+            "by %.2fx. The latent will be smaller than the megapixel target you asked for.",
+            width,
+            height,
+            ceiling,
+            overshoot,
+        )
+        width /= overshoot
+        height /= overshoot
+
+    aligned_width = round_to_nearest_multiple(width, align)
+    aligned_height = round_to_nearest_multiple(height, align)
+
+    if aligned_width < align or aligned_height < align:
+        logger.warning(
+            "Bobs Latent Optimizer: %dx%d px is below the %d px minimum for this model; "
+            "raising it. The aspect ratio will not match what you asked for.",
+            aligned_width,
+            aligned_height,
+            align,
+        )
+
+    width = min(ceiling, max(align, aligned_width))
+    height = min(ceiling, max(align, aligned_height))
     return width, height
 
 
@@ -249,6 +293,19 @@ def _latent_device():
     if model_management is not None:
         return model_management.intermediate_device()
     return torch.device("cpu")
+
+
+def _latent_dtype():
+    """Intermediate dtype, or None when it should not be passed.
+
+    ComfyUI's image latent nodes (EmptyLatentImage, EmptySD3LatentImage) pass
+    dtype=intermediate_dtype(); its video latent nodes (Wan, Hunyuan, Mochi,
+    LTXV) pass only device. We follow that split per model family rather than
+    applying one rule to both.
+    """
+    if model_management is None:
+        return None
+    return model_management.intermediate_dtype()
 
 
 class _BobsLatentBase:
@@ -378,8 +435,14 @@ class _BobsLatentBase:
                 )
             shape = [batch_size, channels, latent_height, latent_width]
 
+        allocate_kwargs = {"device": _latent_device()}
+        if spec["dims"] == 2:
+            dtype = _latent_dtype()
+            if dtype is not None:
+                allocate_kwargs["dtype"] = dtype
+
         try:
-            samples = torch.zeros(shape, device=_latent_device())
+            samples = torch.zeros(shape, **allocate_kwargs)
         except Exception as error:
             raise RuntimeError(
                 f"Could not allocate latent of shape {shape} for {model_type}: {error}"
