@@ -8,20 +8,21 @@ They also calculate **tile dimensions for upscaling workflows**, so you can feed
 
 *   **Aspect Ratio Control:** `1:1`, `16:9`, `3:2`, `13:19`, `85:110`, and so on. `16/9`, `16x9` and decimal components like `1.5:1` are accepted too. A comma is deliberately rejected — `1,5` is a decimal in many locales, so guessing would risk silently reading it as `1:5`.
 *   **Megapixel-Based Sizing:**
-    *   **Standard Node:** pick from a list of approximate megapixel areas (0.25MP … 4MP).
-    *   **Advanced Node:** a continuous float for an exact target area.
+    *   **Standard Node:** pick from a list of preset areas (0.25 … 4). The labels are approximate — see [Megapixel presets](#megapixel-presets) for what each one actually resolves to.
+    *   **Advanced Node:** a continuous float (0.01 – 16.0) for an exact target area.
 *   **Model-Specific Optimizations:**
     *   Rounds base pixel dimensions to the nearest alignment step for the chosen model.
     *   Allocates the correct latent channel count — anywhere from 3 (Chroma Radiance, pixel space) to 128 (Flux2, LTXV).
     *   Applies the correct VAE downscale — 1x, 8x, 16x or 32x depending on the family.
     *   Guarantees pixel dimensions stay divisible by that downscale, so the reported size always matches the tensor.
+    *   Keeps dimensions within ComfyUI's `MAX_RESOLUTION` (16384) and above one alignment step, warning whenever either bound changes what you asked for.
 *   **Video Model Support:** video families emit a proper 5-D latent (`[B, C, T, H, W]`) using ComfyUI's frame formula `((length - 1) // temporal_downscale) + 1`.
 *   **Batch Size Support:** generate batches of latents.
 *   **Optimized Tiling Calculation for Upscalers:**
     *   Targets a **2x2 grid (4 tiles)** for the upscaled image.
     *   Subdivides further along an axis only when a 2x2 tile would exceed the tile cap (**2048px** by default, adjustable via `max_tile_size`).
     *   Tile dimensions are rounded up to a multiple of 8 so tiled VAE nodes are happy.
-*   **Allocation on ComfyUI's intermediate device**, matching the behaviour of the built-in `EmptyLatentImage`.
+*   **Allocation that matches ComfyUI's own nodes** — on the intermediate device, and with `intermediate_dtype()` for image families (video families take only `device`, exactly as ComfyUI's video latent nodes do).
 
 ## Nodes
 
@@ -47,14 +48,35 @@ The nodes appear under the **latent/generate** category.
 
 ### Inputs
 
-*   **`aspect_ratio` (STRING):** target aspect ratio for the base image, e.g. `"1:1"`, `"16:9"`, `"4:3"`.
-*   **`mp_size` (list — Standard node):** approximate target megapixel area.
-*   **`mp_size_float` (FLOAT — Advanced node):** exact target megapixel area (`1.0` = 1024x1024 pixels).
-*   **`upscale_by` (FLOAT):** the upscale factor for your *final* image. Used to compute `tile_width` / `tile_height`. **This node does not perform the upscale.**
-*   **`model_type` (list):** the model family — selects latent channels, VAE downscale, alignment and rank. See the table below.
-*   **`batch_size` (INT):** number of latents in the batch.
-*   **`max_tile_size` (INT, optional):** largest tile edge before the grid subdivides further. Default 2048; lower it if your upscaler runs out of VRAM.
-*   **`length` (INT, optional):** number of video frames. Only used by video families; image families ignore it and log a warning.
+| Input | Type | Range | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `aspect_ratio` | STRING | — | `1:1` | `16:9`, `16/9`, `16x9`, `1.5:1`, or a bare number like `1.777`. A comma is rejected (see below). |
+| `mp_size` | list | 0.25 – 4 | `1` | Standard node only. Preset areas — see the table below. |
+| `mp_size_float` | FLOAT | 0.01 – 16.0 | `1.0` | Advanced node only. `1.0` = 1048576 px (1024x1024). |
+| `upscale_by` | FLOAT | 1.0 – 10.0 | `2.0` | Upscale factor for your *final* image, used only to compute the tile size. **This node does not upscale anything.** |
+| `model_type` | list | 30 families | `FLUX` | Selects channels, VAE downscale, alignment and rank. See [Model reference](#model-reference). |
+| `batch_size` | INT | 1 – 64 | `1` | Number of latents in the batch. |
+| `max_tile_size` | INT (optional) | 256 – 8192 | `2048` | Largest tile edge before the grid subdivides further. Lower it if your upscaler runs out of VRAM. |
+| `length` | INT (optional) | 1 – 4096 | `1` | Video frames. Video families only; image families ignore it and warn. |
+
+#### Megapixel presets
+
+The `mp_size` labels map to common standard resolution areas rather than exact multiples of 1MP, so a couple of them don't match their label. Use the **Advanced** node with `mp_size_float` if you need the exact number.
+
+| `mp_size` | Area (px) | Actual MP | Equivalent to |
+| --------- | --------- | --------- | ------------- |
+| `0.25` | 262144 | 0.25 | 512 x 512 |
+| `0.5` | 589824 | **0.56** | 768 x 768 |
+| `1` | 1048576 | 1.00 | 1024 x 1024 |
+| `1.25` | 1310720 | 1.25 | 1280 x 1024 |
+| `1.5` | 1555200 | 1.48 | 1440 x 1080 |
+| `1.75` | 1810432 | 1.73 | 1664 x 1088 |
+| `2` | 2073600 | 1.98 | 1920 x 1080 |
+| `2.5` | 2359296 | **2.25** | 1536 x 1536 |
+| `3` | 3211264 | 3.06 | 1792 x 1792 |
+| `4` | 4194304 | 4.00 | 2048 x 2048 |
+
+These are the areas *before* model alignment; the final dimensions are rounded to the family's alignment step, so the delivered area shifts by a percent or two either way.
 
 ### Outputs
 
@@ -64,6 +86,19 @@ The nodes appear under the **latent/generate** category.
 *   **`upscale_by` (FLOAT):** passed through unchanged.
 *   **`width` (INT):** base image width in pixels.
 *   **`height` (INT):** base image height in pixels.
+
+### Warnings you might see
+
+The node logs a one-line INFO summary for every run (dimensions, latent shape, tile grid) and warns in four cases. Each warning means the result differs from what you literally asked for — none are cosmetic.
+
+| Warning | Cause | What to do |
+| --- | --- | --- |
+| `...px exceeds the 16384 px limit; scaling down` | An aspect ratio extreme enough to push a dimension past ComfyUI's `MAX_RESOLUTION`. The area is reduced to fit. | Lower `mp_size` or use a less extreme ratio if you wanted the full area. |
+| `...px is below the N px minimum for this model; raising it` | The short side rounded below one alignment step. The aspect ratio will not match what you asked for. | Raise `mp_size`, or accept the distortion. |
+| `length=N ignored - X is an image model` | `length` was set on an image family, which produces a 4-D latent. | Pick a video family, or leave `length` at 1. |
+| `X is not normally driven from an empty latent` | `SEEDVR2` or `HUNYUAN_IMAGE_REFINER` was selected. Both consume an existing image or latent. | You almost certainly want a different node; these are provided for their shapes only. |
+
+An `aspect_ratio` the node cannot parse raises a `ValueError` with the offending value rather than warning — including a comma (`1,5`), which is ambiguous between `1.5` and `1:5` in different locales.
 
 ### Model reference
 
@@ -129,31 +164,59 @@ These two are included so their shapes are available, but **neither is normally 
 
 **Not included:** Stable Cascade needs *two* latents (stage C and stage B) from one node, which doesn't fit this node's single-`LATENT` output. Audio and 3D formats (StableAudio, Hunyuan3D, ACEStep, TripoSplat) aren't image/video latents at all.
 
-### Example Workflow
+### Example workflows
 
-These nodes sit at the start of a generation workflow, before the KSampler. Connect `tile_width` and `tile_height` to the tiled upscaler you use *after* your initial generation and VAE decode.
+#### Image, with tiled upscaling
+
+The node sits at the start of the workflow, before the KSampler. Connect `tile_width` and `tile_height` to the tiled upscaler you use *after* generation and VAE decode.
 
 ```
-[Bobs Latent Optimizer] ----> latent (to KSampler)
-                         |
-                         |---> tile_width  -----\
-                         |                      |
-                         |---> tile_height -----+--> [Your Tiled Upscaler Node]
-                         |                                (Ultimate SD Upscale, Tiled VAE Decode, …)
-                         |
-                         ----> upscale_by ------> (if your upscaler takes a scale factor directly)
-
-[KSampler] --------------> VAE --------------> [Tiled Upscaler Node]
-(using latent from above)  (decode)             (using tile_width, tile_height from above)
+[Bobs Latent Optimizer]
+  model_type: FLUX          ----> latent ---------> [KSampler] ---> [VAE Decode] ---+
+  aspect_ratio: 16:9          |                                                     |
+  mp_size: 1                  |---> tile_width  ---\                                |
+  upscale_by: 2.0             |                     +--> [Tiled Upscaler] <---------+
+                              |---> tile_height ---/     (Ultimate SD Upscale,
+                              |                           Tiled VAE Decode, …)
+                              |---> upscale_by -------> (if it takes a scale factor)
+                              |
+                              |---> width, height ----> (labels, filenames, debug)
 ```
 
-**Why is this useful for tiling?**
+With those settings the base image is 1344x768, and the tiles come back as 1344x768 — a 2x2 grid over the 2688x1536 upscaled output.
+
+#### Video
+
+Video families need the `length` input and emit a 5-D latent. Nothing else changes.
+
+```
+[Bobs Latent Optimizer]
+  model_type: WAN           ----> latent ---------> [Wan sampler] ---> [VAE Decode]
+  aspect_ratio: 16:9          |
+  mp_size: 0.5                |---> width, height -> (for a matching video combine node)
+  length: 81
+```
+
+`length: 81` with Wan's temporal downscale of 4 gives 21 latent frames — `((81 - 1) // 4) + 1`.
+
+**Why is the tiling useful?**
 
 Rather than guessing tile sizes, the node derives them from your desired final resolution (`base_resolution * upscale_by`) and the per-tile cap. That avoids:
 
 *   tiles large enough to cause VRAM errors,
 *   tiles unnecessarily small, adding processing overhead and seam risk,
 *   inconsistent tiling between workflows.
+
+## Upgrading from 1.2.x
+
+Saved workflows keep loading — all five original `model_type` values still exist, and the two new outputs were appended so existing output links are unchanged. Four things do behave differently:
+
+*   **`SD3` and `QWEN` produce different latents.** Both were allocated with 4 channels; both use 16-channel VAEs. `QWEN` also aligned to 28, which isn't divisible by the VAE stride of 8, so the reported pixel size didn't describe the tensor — it now aligns to 16. These were bugs; the new output is the correct one.
+*   **`SD3` now honours `mp_size`.** It used to rescale every result back to roughly 1MP, so a 4MP selection silently gave you 1MP.
+*   **`WAN` now emits a 5-D latent** `[B, C, T, H, W]` instead of 4-D, and takes a `length` input. The old 4-D shape was not usable with Wan samplers.
+*   **`16,9` no longer parses.** Use `16:9`. A comma is ambiguous with decimal-comma locales, where `1,5` means 1.5.
+
+**`FLUX` and `SDXL` are unchanged** — same dimensions, same channel counts, same tiles.
 
 ## Development
 
@@ -162,6 +225,19 @@ The sizing and tiling math is exposed as plain functions (`parse_aspect_ratio`, 
 ```
 python -m unittest discover -s tests -v
 ```
+
+CI runs the same suite on Python 3.9 and 3.12.
+
+### Adding a model family
+
+1.  Find the model in ComfyUI's `comfy/supported_models.py` to get its `latent_format`, then read that class in `comfy/latent_formats.py` for `latent_channels`, `latent_dimensions`, `spacial_downscale_ratio` and `temporal_downscale_ratio`.
+2.  Add a row to `MODEL_SPECS` in `Bobs_Latent_Optimizer.py`. **`align` must be a multiple of `vae_scale`** — that invariant is what keeps `width // vae_scale` exact, and a test enforces it.
+3.  Add the same verbatim upstream values to `COMFY_REFERENCE` in the test suite. If you need to deviate from upstream, put the deviation in `INTENTIONAL_OVERRIDES` with a justification rather than editing the reference table — a test asserts each override still genuinely conflicts, so it becomes obvious dead code if upstream ever agrees.
+4.  Cross-check against the matching `Empty*Latent*` node in `nodes.py` / `comfy_extras/` where one exists. Not every family has one; say so in the comment if you couldn't verify.
+
+### Releasing
+
+Bump `version` in `pyproject.toml` and merge to `main` — the publish workflow triggers on that path and pushes to the registry. It refuses to run from any other branch, including via manual dispatch, because publishing from a feature branch ships unmerged code and burns the version number.
 
 ## Changelog
 
